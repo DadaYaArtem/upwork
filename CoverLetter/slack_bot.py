@@ -7,6 +7,12 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from dotenv import load_dotenv
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 # Импортируем FastAPI приложение из соседнего файла
 from cover_letter_generator import app as fastapi_app
