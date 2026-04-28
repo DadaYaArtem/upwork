@@ -212,7 +212,7 @@ Tilek
 # ----------------------------------------------------------------------
 # Путь к папке с кейсами (относительно корня проекта)
 # ----------------------------------------------------------------------
-CASES_DIR = Path(__file__).parent.parent / "lead_gen_main" / "backend" / "knowledge_base" / "cases"
+CASES_DIR = Path(__file__).parent.parent / "backend" / "knowledge_base" / "cases"
 
 
 async def load_case_content(case_id: str) -> str:
@@ -367,12 +367,11 @@ async def evaluate_job_and_generate(
 # Пайплайн обработки (без GUI)
 # ----------------------------------------------------------------------
 async def process_job(job_description: str) -> dict:
+    """Основная функция обработки вакансии – возвращает готовый результат."""
     try:
-        # 1. Получение релевантных кейсов через RAG
         best_cases = await rag.retrieve_cases(job_description, OPENAI_API_KEY)
         if not best_cases:
             return {"error": "No relevant cases found."}
-        # 2. Загрузка содержимого кейсов
         best_cases_with_content = []
         for case in best_cases:
             case_id = case.get("id")
@@ -388,7 +387,6 @@ async def process_job(job_description: str) -> dict:
                 })
         if not best_cases_with_content:
             return {"error": "No cases could be loaded."}
-        # 3. Генерация оценки и письма
         evaluation = await evaluate_job_and_generate(
             rag_query=job_description,
             best_cases_with_content=best_cases_with_content,
@@ -400,34 +398,4 @@ async def process_job(job_description: str) -> dict:
         )
         return evaluation
     except Exception as e:
-        return {"error": f"RAG retrieval failed: {str(e)}"}
-
-
-# ----------------------------------------------------------------------
-# FastAPI приложение
-# ----------------------------------------------------------------------
-app = FastAPI(title="AI Job Application Assistant")
-
-
-class JobRequest(BaseModel):
-    job_description: str
-
-
-@app.post("/generate")
-async def generate_letter(request: JobRequest):
-    try:
-        result = await process_job(request.job_description)
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ----------------------------------------------------------------------
-# Запуск сервера (при запуске файла напрямую)
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        return {"error": f"Processing failed: {str(e)}"}
