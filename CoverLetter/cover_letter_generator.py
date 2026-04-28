@@ -367,37 +367,40 @@ async def evaluate_job_and_generate(
 # Пайплайн обработки (без GUI)
 # ----------------------------------------------------------------------
 async def process_job(job_description: str) -> dict:
-    # 1. Получение релевантных кейсов через RAG
-    best_cases = await rag.retrieve_cases(job_description, OPENAI_API_KEY)
-    if not best_cases:
-        return {"error": "No relevant cases found."}
-    # 2. Загрузка содержимого кейсов
-    best_cases_with_content = []
-    for case in best_cases:
-        case_id = case.get("id")
-        if not case_id:
-            continue
-        content = await load_case_content(case_id)
-        if content:
-            best_cases_with_content.append({
-                "id": case_id,
-                "name": case.get("name", ""),
-                "link": case.get("link", ""),
-                "content": content
-            })
-    if not best_cases_with_content:
-        return {"error": "No cases could be loaded."}
-    # 3. Генерация оценки и письма
-    evaluation = await evaluate_job_and_generate(
-        rag_query=job_description,
-        best_cases_with_content=best_cases_with_content,
-        user_profiles=user_profiles,
-        selection_rules=selection_rules,
-        cover_letter_rules=cover_letter_rules,
-        letter_template=letter_template,
-        api_key=OPENAI_API_KEY
-    )
-    return evaluation
+    try:
+        # 1. Получение релевантных кейсов через RAG
+        best_cases = await rag.retrieve_cases(job_description, OPENAI_API_KEY)
+        if not best_cases:
+            return {"error": "No relevant cases found."}
+        # 2. Загрузка содержимого кейсов
+        best_cases_with_content = []
+        for case in best_cases:
+            case_id = case.get("id")
+            if not case_id:
+                continue
+            content = await load_case_content(case_id)
+            if content:
+                best_cases_with_content.append({
+                    "id": case_id,
+                    "name": case.get("name", ""),
+                    "link": case.get("link", ""),
+                    "content": content
+                })
+        if not best_cases_with_content:
+            return {"error": "No cases could be loaded."}
+        # 3. Генерация оценки и письма
+        evaluation = await evaluate_job_and_generate(
+            rag_query=job_description,
+            best_cases_with_content=best_cases_with_content,
+            user_profiles=user_profiles,
+            selection_rules=selection_rules,
+            cover_letter_rules=cover_letter_rules,
+            letter_template=letter_template,
+            api_key=OPENAI_API_KEY
+        )
+        return evaluation
+    except Exception as e:
+        return {"error": f"RAG retrieval failed: {str(e)}"}
 
 
 # ----------------------------------------------------------------------
