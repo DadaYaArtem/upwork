@@ -10,8 +10,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
-# Импорт модуля rag – предполагается, что он лежит в lead_gen_main.backend
-from lead_gen_main.backend import rag
+from backend import rag
 
 # Загрузка переменных окружения
 env_path = Path(__file__).parent / ".env"
