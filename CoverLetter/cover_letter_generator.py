@@ -10,6 +10,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import sys
+import gspread
+from google.oauth2.service_account import Credentials
+from datetime import datetime
 
 ROOT_DIR = Path(__file__).parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -363,6 +366,41 @@ async def evaluate_job_and_generate(
         }
 
 
+def append_to_google_sheet(job_description: str, profile_name: str, cover_letter: str, screening_answers: str = ""):
+    """
+    Записывает данные в Google Sheets таблицу.
+    """
+    try:
+        creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
+        spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
+        worksheet_name = os.getenv("GOOGLE_SHEETS_WORKSHEET_NAME", "Sheet1")
+
+        if not creds_json or not spreadsheet_id:
+            print("⚠️ Google Sheets credentials not configured, skipping logging")
+            return
+
+        creds_dict = json.loads(creds_json)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client_gspread = gspread.authorize(creds)
+
+        sheet = client_gspread.open_by_key(spreadsheet_id).worksheet(worksheet_name)
+        now = datetime.now().isoformat()
+
+        # Ограничиваем длину полей
+        job_preview = job_description[:5000] + "..." if len(job_description) > 5000 else job_description
+        letter_preview = cover_letter[:5000] + "..." if len(cover_letter) > 5000 else cover_letter
+        screening_preview = screening_answers[:5000] + "..." if len(screening_answers) > 5000 else screening_answers
+
+        row = [now, job_preview, profile_name, letter_preview, screening_preview]
+        sheet.append_row(row)
+        print(f"✅ Записано в Google Sheets: {profile_name} - PASS")
+    except Exception as e:
+        import traceback
+        print(f"❌ Ошибка записи в Google Sheets: {e}")
+        traceback.print_exc()
+
+
 # ----------------------------------------------------------------------
 # Пайплайн обработки (без GUI)
 # ----------------------------------------------------------------------
@@ -396,6 +434,21 @@ async def process_job(job_description: str) -> dict:
             letter_template=letter_template,
             api_key=OPENAI_API_KEY
         )
+
+        # --- Запись в Google Sheets при PASS ---
+        job_eval = evaluation.get("job_evaluation", {})
+        if job_eval.get("decision") == "PASS":
+            selected_profile = evaluation.get("selected_profile", {}).get("name", "Unknown")
+            cover_letter = evaluation.get("cover_letter", "")
+            screening_answers = evaluation.get("screening_answers", "")
+            # Запускаем в фоновом потоке, чтобы не блокировать
+            import threading
+            threading.Thread(
+                target=append_to_google_sheet,
+                args=(job_description, selected_profile, cover_letter, screening_answers),
+                daemon=True
+            ).start()
+
         return evaluation
     except Exception as e:
         return {"error": f"Processing failed: {str(e)}"}
