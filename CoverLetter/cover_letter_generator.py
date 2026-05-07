@@ -73,7 +73,7 @@ user_profiles = [
             "Docker, Kubernetes, Terraform",
             "Git, GitLab CI/CD, GitHub Actions, dbt, Fivetran, CircleCI, SSIS, CDK"
         ],
-        "min_salary_per_hour_usd": 40,
+        "min_salary_per_hour_usd": 50,
         "priority_cases": [
             "Scale AI", "Arcade", "Deverus", "Generative AI Marketplace",
             "AI Identity Verification", "CryptoPay", "LLM Chatbot & RAG System",
@@ -93,7 +93,8 @@ user_profiles = [
             "Cloud deployment with AWS, Docker, and CI/CD pipelines",
             "Cross-platform development using Flutter and React Native"
         ],
-        "min_salary_per_hour_usd": 35,
+        "min_salary_per_hour_usd": 40,
+        "min_salary_agency_usd": 35,
         "priority_cases": [
             "Scale AI", "Arcade", "Deverus", "Generative AI Marketplace",
             "AI Identity Verification", "CryptoPay", "LLM Chatbot & RAG System",
@@ -240,9 +241,15 @@ async def evaluate_job_and_generate(
         selection_rules: dict,
         cover_letter_rules: str,
         letter_template: str,
-        api_key: str
+        api_key: str,
+        allowed_profiles: list = None,
+        forbidden_case_ids: list = None
 ) -> dict:
     client_local = AsyncOpenAI(api_key=api_key)
+    profiles_to_use = [p for p in user_profiles if allowed_profiles is None or p["name"] in allowed_profiles]
+    forbidden_note = ""
+    if forbidden_case_ids:
+        forbidden_note = f"IMPORTANT: The following case IDs were already used in another letter for this same job — do NOT select them: {', '.join(forbidden_case_ids)}."
 
     cases_text = ""
     for idx, case in enumerate(best_cases_with_content, 1):
@@ -258,7 +265,7 @@ async def evaluate_job_and_generate(
     {cases_text}
 
     ### Профили кандидатов (JSON):
-    {json.dumps(user_profiles, indent=2, ensure_ascii=False)}
+    {json.dumps(profiles_to_use, indent=2, ensure_ascii=False)}
 
     ### Базовые правила отбора работы (общие для всех кандидатов):
     {json.dumps(selection_rules, indent=2, ensure_ascii=False)}
@@ -280,7 +287,7 @@ async def evaluate_job_and_generate(
 
     2. **Profile Selection**: Если решение PASS, выбери одного кандидата из списка профилей, который лучше всего подходит под вакансию. Учти:
        - Соответствие skills (особенно обязательным из описания вакансии).
-       - min_salary_per_hour: если бюджет вакансии ниже этой ставки, то кандидат не подходит.
+       - min_salary_per_hour: Tilek minimum is $50/hr. Victoria solo angle minimum is $40/hr. Victoria / Vicode Solutions agency angle minimum is $35/hr. If the job budget is below the applicable minimum, the candidate does not qualify.
        - priority_cases: если у кандидата есть приоритетные кейсы, которые совпадают с индустрией/стеком вакансии – это плюс.
        - Общий опыт и позиция.
 
@@ -292,13 +299,24 @@ async def evaluate_job_and_generate(
        - Ссылку на **внешний клиентский сайт**, если она присутствует. **Важно**: ссылки, ведущие на `interexy` (например, `https://interexy.com/cases/...`), а также ссылки на магазины приложений (App Store, Google Play, `playmarket`, `apps.apple.com`, `play.google.com`) НЕ включай. Используй только ссылки на оригинальный сайт клиента (например, `https://classful.com`, `https://scale.com`). Если такой ссылки нет, оставь поле `link` пустым.
        - Одно предложение, почему этот кейс подходит (стек, индустрия, тип проблемы).
 
+       {forbidden_note}
        Никогда не используй один кейс дважды. Если подходящих нет – выбери наиболее близкие.
 
-    4. **Cover Letter Generation**: Напиши письмо-отклик от лица выбранного кандидата, строго следуя правилам оформления (cover_letter_rules). Используй буквально правила: структуру (Hook, Bridge, Case 1, Case 2, Closing, CTA, Signature), форматирование (без маркеров, без жирного, без заголовков, только plain paragraphs), максимальную длину 150-200 слов. Вплети 3-5 ключевых навыков из вакансии в описание кейсов или в closing. Не перечисляй их списком.
+    4. **Hook Generation**: Generate exactly 3 distinct hook options for Block 1 of the cover letter.
+       Rules for each hook:
+       - Addresses a different specific technical risk, business pain, or observable challenge from the job description.
+       - Never starts with "Most...". Use conversational openers only: "Let me be honest...", "From what I see...", "To be honest...", "Let me be direct...", or similar natural openers.
+       - 1-2 sentences maximum.
+       - Must be specific to THIS job — not a generic opener that could apply to any posting.
+
+       Score each hook 0-10 on specificity (how directly it targets a concrete, observable pain from THIS job description).
+       Auto-select the highest-scoring hook as `selected_hook`. It will be used as Block 1 in the cover letter.
+
+    5. **Cover Letter Generation**: Напиши письмо-отклик от лица выбранного кандидата, строго следуя правилам оформления (cover_letter_rules). Use `selected_hook` (from step 4) as Block 1 (Hook) of the letter. Используй буквально правила: структуру (Hook, Bridge, Case 1, Case 2, Closing, CTA, Signature), форматирование (без маркеров, без жирного, без заголовков, только plain paragraphs), максимальную длину 150-200 слов. Вплети 3-5 ключевых навыков из вакансии в описание кейсов или в closing. Не перечисляй их списком.
 
        **Важно про переводы строк**: при генерации письма используй **реальные символы перевода строки** (line breaks) для разделения абзацев. Не экранируй их как `\\n`. В поле `cover_letter` JSON должен содержать текст с настоящими переносами строк (это допустимо в JSON строках). Абзацы отделяй пустой строкой (два перевода строки).
 
-    5. **Screening Answers**: Если в описании вакансии есть блок скрининг-вопросов (обычно начинается с "You will be asked to answer..." или "Please answer the following"), то сгенерируй ответы на каждый вопрос в виде нумерованного списка. Ответы должны быть полными, с деталями проектов, ссылками на кейсы, технологиями и метриками. Если вопрос про опыт – обязательно указывай конкретный кейс (из выбранных выше). Если вопрос про сертификаты – ответь стандартно: "У меня нет формальных сертификатов, но есть подтверждённый производственный опыт". Для технических вопросов дай точный ответ. Если скрининг-вопросов нет, оставь поле пустым.
+    6. **Screening Answers**: Если в описании вакансии есть блок скрининг-вопросов (обычно начинается с "You will be asked to answer..." или "Please answer the following"), то сгенерируй ответы на каждый вопрос в виде нумерованного списка. Ответы должны быть полными, с деталями проектов, ссылками на кейсы, технологиями и метриками. Если вопрос про опыт – обязательно указывай конкретный кейс (из выбранных выше). Если вопрос про сертификаты – ответь стандартно: "У меня нет формальных сертификатов, но есть подтверждённый производственный опыт". Для технических вопросов дай точный ответ. Если скрининг-вопросов нет, оставь поле пустым.
 
        **Важно про переводы строк**: при генерации ответов используй **реальные символы перевода строки** (line breaks). Каждый новый вопрос с ответом начинай с новой строки. В поле `screening_answers` JSON должен содержать текст с настоящими переносами строк, а не экранированными `\\n`.
 
@@ -321,6 +339,12 @@ async def evaluate_job_and_generate(
           "reasoning": "почему выбран"
         }}
       ],
+      "hook_options": [
+        {{"text": "hook variant 1", "specificity_score": 8}},
+        {{"text": "hook variant 2", "specificity_score": 6}},
+        {{"text": "hook variant 3", "specificity_score": 7}}
+      ],
+      "selected_hook": "text of the highest-scoring hook",
       "cover_letter": "текст письма (с переносами строк)",
       "screening_answers": "текст ответов (с переносами строк) или пустая строка"
     }}
@@ -345,6 +369,8 @@ async def evaluate_job_and_generate(
             result['cover_letter'] = fix_newlines(result['cover_letter'])
         if 'screening_answers' in result:
             result['screening_answers'] = fix_newlines(result['screening_answers'])
+        if 'selected_hook' in result:
+            result['selected_hook'] = fix_newlines(result['selected_hook'])
         return result
     except json.JSONDecodeError as e:
         print(f"JSON decode error: {e}")
@@ -401,6 +427,35 @@ def append_to_google_sheet(job_description: str, profile_name: str, cover_letter
         traceback.print_exc()
 
 
+async def detect_dual_profile(job_description: str, api_key: str) -> bool:
+    """Returns True if the job genuinely requires both AI/ML and fullstack expertise."""
+    client_local = AsyncOpenAI(api_key=api_key)
+    prompt = (
+        "Analyze this job description and determine if it requires BOTH:\n"
+        "- AI/ML skills (LLM, Python ML/data, RAG, MLOps, AI agents, NLP, data engineering)\n"
+        "- AND fullstack development skills (React, Node.js, SaaS frontend/backend, web app development)\n\n"
+        "A job qualifies as dual-profile ONLY if it genuinely requires deep expertise in BOTH areas "
+        "simultaneously — not just passing familiarity with one while being primarily the other.\n\n"
+        "Respond with JSON only: {\"dual_profile\": true} or {\"dual_profile\": false}\n\n"
+        "Job description:\n" + job_description
+    )
+    try:
+        response = await client_local.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You analyze job requirements. Respond only with JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(response.choices[0].message.content)
+        return bool(result.get("dual_profile", False))
+    except Exception as e:
+        print(f"dual_profile detection error: {e}")
+        return False
+
+
 # ----------------------------------------------------------------------
 # Пайплайн обработки (без GUI)
 # ----------------------------------------------------------------------
@@ -425,6 +480,47 @@ async def process_job(job_description: str) -> dict:
                 })
         if not best_cases_with_content:
             return {"error": "No cases could be loaded."}
+
+        is_dual = await detect_dual_profile(job_description, OPENAI_API_KEY)
+
+        if is_dual:
+            tilek_result = await evaluate_job_and_generate(
+                rag_query=job_description,
+                best_cases_with_content=best_cases_with_content,
+                user_profiles=user_profiles,
+                selection_rules=selection_rules,
+                cover_letter_rules=cover_letter_rules,
+                letter_template=letter_template,
+                api_key=OPENAI_API_KEY,
+                allowed_profiles=["Tilek Chubakov"]
+            )
+            tilek_case_ids = [c.get("case_id", "") for c in tilek_result.get("selected_cases", [])]
+            victoria_result = await evaluate_job_and_generate(
+                rag_query=job_description,
+                best_cases_with_content=best_cases_with_content,
+                user_profiles=user_profiles,
+                selection_rules=selection_rules,
+                cover_letter_rules=cover_letter_rules,
+                letter_template=letter_template,
+                api_key=OPENAI_API_KEY,
+                allowed_profiles=["Victoria", "Vicode Solutions"],
+                forbidden_case_ids=tilek_case_ids
+            )
+            import threading
+            for sub_result in [tilek_result, victoria_result]:
+                if sub_result.get("job_evaluation", {}).get("decision") == "PASS":
+                    threading.Thread(
+                        target=append_to_google_sheet,
+                        args=(
+                            job_description,
+                            sub_result.get("selected_profile", {}).get("name", "Unknown"),
+                            sub_result.get("cover_letter", ""),
+                            sub_result.get("screening_answers", "")
+                        ),
+                        daemon=True
+                    ).start()
+            return {"dual": True, "tilek": tilek_result, "victoria": victoria_result}
+
         evaluation = await evaluate_job_and_generate(
             rag_query=job_description,
             best_cases_with_content=best_cases_with_content,
@@ -435,13 +531,11 @@ async def process_job(job_description: str) -> dict:
             api_key=OPENAI_API_KEY
         )
 
-        # --- Запись в Google Sheets при PASS ---
         job_eval = evaluation.get("job_evaluation", {})
         if job_eval.get("decision") == "PASS":
             selected_profile = evaluation.get("selected_profile", {}).get("name", "Unknown")
             cover_letter = evaluation.get("cover_letter", "")
             screening_answers = evaluation.get("screening_answers", "")
-            # Запускаем в фоновом потоке, чтобы не блокировать
             import threading
             threading.Thread(
                 target=append_to_google_sheet,

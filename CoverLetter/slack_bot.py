@@ -15,6 +15,48 @@ if str(ROOT_DIR) not in sys.path:
 
 from cover_letter_generator import process_job
 
+
+def format_result_message(result: dict, header: str = "") -> str:
+    cover_letter = result.get("cover_letter")
+    screening = result.get("screening_answers")
+    job_eval = result.get("job_evaluation", {})
+
+    blocks = []
+    if header:
+        blocks.append(f"*{header}*")
+    if job_eval.get("decision") == "PASS":
+        blocks.append(f"✅ *Решение:* PASS\n_{job_eval.get('reasoning')}_")
+    else:
+        blocks.append(f"❌ *Решение:* SKIP\n_{job_eval.get('reasoning')}_")
+
+    hook_options = result.get("hook_options", [])
+    selected_hook = result.get("selected_hook", "")
+    if hook_options:
+        lines = []
+        for i, h in enumerate(hook_options, 1):
+            marker = "✅" if h.get("text") == selected_hook else "  "
+            lines.append(f"{marker} {i}. _(score: {h.get('specificity_score', '?')})_ {h.get('text', '')}")
+        blocks.append("🪝 *Hook options (✅ = auto-selected):*\n" + "\n".join(lines))
+
+    if cover_letter:
+        blocks.append(f"📝 *Письмо-отклик:*\n```{cover_letter}```")
+    if screening:
+        blocks.append(f"❓ *Ответы на вопросы:*\n```{screening}```")
+
+    selected = result.get("selected_profile", {})
+    if selected.get("name"):
+        blocks.append(f"👤 *Выбранный профиль:* {selected['name']} – {selected.get('reasoning', '')}")
+
+    cases = result.get("selected_cases", [])
+    if cases:
+        cases_text = "\n".join([f"• {c['name']} – {c.get('reasoning', '')}" for c in cases])
+        blocks.append(f"📂 *Выбранные кейсы:*\n{cases_text}")
+
+    msg = "\n\n".join(blocks)
+    if len(msg) > 4000:
+        msg = msg[:3950] + "\n... (сообщение обрезано)"
+    return msg
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
@@ -58,34 +100,13 @@ def handle_direct_message(message, say):
         say(f"❌ Ошибка: {result['error']}")
         return
 
-    cover_letter = result.get("cover_letter")
-    screening = result.get("screening_answers")
-    job_eval = result.get("job_evaluation", {})
+    if result.get("dual"):
+        say("🔀 *Двойной профиль — два письма независимо*")
+        say(format_result_message(result.get("tilek", {}), header="🤖 Tilek Letter:"))
+        say(format_result_message(result.get("victoria", {}), header="💻 Victoria Letter:"))
+        return
 
-    blocks = []
-    if job_eval.get("decision") == "PASS":
-        blocks.append(f"✅ *Решение:* PASS\n_{job_eval.get('reasoning')}_")
-    else:
-        blocks.append(f"❌ *Решение:* SKIP\n_{job_eval.get('reasoning')}_")
-
-    if cover_letter:
-        blocks.append(f"📝 *Письмо-отклик:*\n```{cover_letter}```")
-    if screening:
-        blocks.append(f"❓ *Ответы на вопросы:*\n```{screening}```")
-
-    selected = result.get("selected_profile", {})
-    if selected.get("name"):
-        blocks.append(f"👤 *Выбранный профиль:* {selected['name']} – {selected.get('reasoning', '')}")
-
-    cases = result.get("selected_cases", [])
-    if cases:
-        cases_text = "\n".join([f"• {c['name']} – {c.get('reasoning', '')}" for c in cases])
-        blocks.append(f"📂 *Выбранные кейсы:*\n{cases_text}")
-
-    final_message = "\n\n".join(blocks)
-    if len(final_message) > 4000:
-        final_message = final_message[:3950] + "\n... (сообщение обрезано)"
-    say(final_message)
+    say(format_result_message(result))
 
 if __name__ == "__main__":
     handler = SocketModeHandler(slack_app, SLACK_APP_TOKEN)
