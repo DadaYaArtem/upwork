@@ -20,13 +20,12 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend import rag
 
-# Загрузка переменных окружения
-env_path = Path(__file__).parent / ".env"
-load_dotenv(dotenv_path=env_path)
+# Загрузка переменных окружения (локально из .env, на Railway — системные env vars)
+load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in .env")
+    raise ValueError("OPENAI_API_KEY environment variable is not set")
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
