@@ -74,7 +74,7 @@ def handle_direct_message(message, say):
     logger.info(f"📨 Получено сообщение: {message}")
     if message.get("channel_type") != "im":
         return
-    if "bot_id" in message:
+    if "bot_id" in message or message.get("subtype"):
         return
 
     user_text = message.get("text", "").strip()
