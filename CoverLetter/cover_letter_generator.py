@@ -6,8 +6,6 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import sys
 import gspread
