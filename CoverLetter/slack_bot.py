@@ -25,7 +25,7 @@ ROOT_DIR = Path(__file__).parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from cover_letter_generator import process_job, refine_letter, OPENAI_API_KEY
+from cover_letter_generator import process_job, refine_letter, answer_about_last_result, OPENAI_API_KEY
 
 
 # -----------------------------------------------------------------------------
@@ -33,6 +33,7 @@ from cover_letter_generator import process_job, refine_letter, OPENAI_API_KEY
 # Если бот рестартует - юзер просто отправит вакансию ещё раз.
 # -----------------------------------------------------------------------------
 _user_last_result: dict[str, dict] = {}
+_user_pending_clarification: dict[str, dict] = {}
 
 
 def _save_last_result(user_id: str, result: dict) -> None:
@@ -41,6 +42,14 @@ def _save_last_result(user_id: str, result: dict) -> None:
 
 def _get_last_result(user_id: str) -> dict | None:
     return _user_last_result.get(user_id)
+
+
+def _save_pending_clarification(user_id: str, pending: dict) -> None:
+    _user_pending_clarification[user_id] = pending
+
+
+def _pop_pending_clarification(user_id: str) -> dict | None:
+    return _user_pending_clarification.pop(user_id, None)
 
 
 # -----------------------------------------------------------------------------
@@ -93,6 +102,170 @@ def detect_refine_instruction(text: str) -> str | None:
     if re.match(r"^(make it|please make|сделай|перепиши|rewrite|adjust|change)\b", t):
         return text.strip()
     return None
+
+
+def looks_like_new_job(text: str) -> bool:
+    t = text.strip().lower()
+    if len(t) > 700 or t.count("\n") >= 10:
+        return True
+
+    job_markers = [
+        "job description", "we are looking", "we need", "looking for", "requirements",
+        "responsibilities", "budget", "hourly", "fixed price", "upwork", "proposal",
+        "about the role", "scope of work", "candidate", "developer needed",
+    ]
+    marker_count = sum(1 for marker in job_markers if marker in t)
+    return len(t) > 250 and marker_count >= 2
+
+
+def _profile_from_text(text: str) -> str | None:
+    t = text.lower()
+    if re.search(r"\b(tilek|тайлек)\b", t):
+        return "tilek"
+    if re.search(r"\b(victoria|vika|вика|виктория)\b", t):
+        return "victoria"
+    return None
+
+
+def _target_from_text(text: str) -> dict:
+    t = text.lower()
+
+    variant_match = re.search(r"(?:вариант|variant)\s*([123])\b", t)
+    if not variant_match:
+        variant_match = re.search(r"\b([123])\s*(?:вариант|variant)\b", t)
+    if variant_match:
+        return {"target_type": "variant", "variant_index": int(variant_match.group(1)) - 1}
+
+    if re.search(r"\b(main|основн\w*|обычн\w*)\b", t) or "письмо-отклик" in t:
+        return {"target_type": "main", "variant_index": None}
+
+    if re.search(r"\b(screening|answers?)\b", t) or re.search(r"\b(ответ\w*|вопрос\w*)\b", t):
+        return {"target_type": "screening", "variant_index": None}
+
+    return {"target_type": None, "variant_index": None}
+
+
+def _edit_instruction_from_text(text: str) -> str | None:
+    known = detect_refine_instruction(text)
+    if known:
+        return known
+
+    t = text.lower()
+    if "короч" in t:
+        return "Make the selected text shorter and more concise. Keep the core cases, CTA, and signature."
+    if "длинн" in t:
+        return "Make the selected text slightly longer by adding concrete job-specific and technical detail."
+    if "технич" in t or "детал" in t:
+        return "Add more concrete technical detail while keeping the text concise and specific to the job."
+    if "менее формаль" in t or "неформаль" in t or "разговорн" in t:
+        return "Make the tone more direct and conversational, dropping corporate phrasing."
+    if "формаль" in t:
+        return "Make the tone more polished and professional without making it generic."
+    if "переп" in t or "rewrite" in t:
+        return text.strip()
+    if re.search(r"\b(make|change|adjust|shorter|longer|improve|rewrite|add|remove)\b", t):
+        return text.strip()
+    if re.search(r"\b(сделай|измени|добавь|убери|улучши|сократи)\b", t):
+        return text.strip()
+    return None
+
+
+def _is_question_about_result(text: str) -> bool:
+    t = text.lower().strip()
+    question_terms = [
+        "?", "какой", "какая", "какие", "почему", "зачем", "что лучше", "лучше",
+        "why", "which", "what", "explain", "объясни", "поясни",
+    ]
+    return any(term in t for term in question_terms)
+
+
+def classify_followup_message(text: str, last_result: dict | None) -> dict:
+    if looks_like_new_job(text) or not last_result:
+        return {"action": "new_job"}
+
+    instruction = _edit_instruction_from_text(text)
+    if instruction:
+        target = _target_from_text(text)
+        profile_key = _profile_from_text(text)
+        if target["target_type"] is None:
+            return {
+                "action": "clarify",
+                "missing": "target",
+                "instruction": instruction,
+                "original_text": text,
+                "message": "Что именно поправить: основное письмо, вариант 1/2/3 или ответы на вопросы?",
+            }
+        if last_result.get("dual") and not profile_key:
+            return {
+                "action": "clarify",
+                "missing": "profile",
+                "instruction": instruction,
+                "original_text": text,
+                "target_type": target["target_type"],
+                "variant_index": target["variant_index"],
+                "message": "Для какого профиля поправить: Tilek или Victoria?",
+            }
+        return {
+            "action": "edit",
+            "instruction": instruction,
+            "target_type": target["target_type"],
+            "variant_index": target["variant_index"],
+            "profile_key": profile_key,
+        }
+
+    if _is_question_about_result(text):
+        return {"action": "question", "question": text}
+
+    return {"action": "new_job"}
+
+
+def resolve_pending_followup(pending: dict, reply_text: str, last_result: dict | None) -> dict:
+    if looks_like_new_job(reply_text):
+        return {"action": "new_job"}
+
+    merged_text = f"{pending.get('original_text', '')} {reply_text}".strip()
+    route = classify_followup_message(merged_text, last_result)
+    if route.get("action") == "edit":
+        return route
+
+    if pending.get("missing") == "target":
+        target = _target_from_text(reply_text)
+        profile_key = _profile_from_text(reply_text)
+        if target["target_type"] is None:
+            route["message"] = "Я всё ещё не понял цель. Напиши, например: `вариант 3`, `основное письмо` или `ответы`."
+            return route
+        if last_result and last_result.get("dual") and not profile_key:
+            return {
+                "action": "clarify",
+                "missing": "profile",
+                "instruction": pending["instruction"],
+                "original_text": merged_text,
+                "target_type": target["target_type"],
+                "variant_index": target["variant_index"],
+                "message": "Ок, понял цель. Теперь уточни профиль: Tilek или Victoria?",
+            }
+        return {
+            "action": "edit",
+            "instruction": pending["instruction"],
+            "target_type": target["target_type"],
+            "variant_index": target["variant_index"],
+            "profile_key": profile_key,
+        }
+
+    if pending.get("missing") == "profile":
+        profile_key = _profile_from_text(reply_text)
+        if not profile_key:
+            route["message"] = "Я всё ещё не понял профиль. Напиши `Tilek` или `Victoria`."
+            return route
+        return {
+            "action": "edit",
+            "instruction": pending["instruction"],
+            "target_type": pending["target_type"],
+            "variant_index": pending["variant_index"],
+            "profile_key": profile_key,
+        }
+
+    return route
 
 
 # -----------------------------------------------------------------------------
@@ -182,6 +355,115 @@ def say_proposal_variants(result: dict, say, header: str = "Proposal variants") 
         say(msg)
 
 
+def format_single_variant_message(variant: dict, variant_index: int, header: str = "Updated proposal variant") -> str:
+    structure = variant.get("structure_name") or f"Variant {variant_index + 1}"
+    angle = variant.get("angle") or ""
+    cover_letter = variant.get("cover_letter") or ""
+
+    blocks = [f"*{header} - {variant_index + 1}. {structure}*"]
+    if angle:
+        blocks.append(f"*Angle:* {angle}")
+    blocks.append(f"```{cover_letter}```")
+    msg = "\n\n".join(blocks)
+    if len(msg) > 4000:
+        msg = msg[:3950] + "\n... (variant message truncated)"
+    return msg
+
+
+def _result_for_profile(last_result: dict, profile_key: str | None) -> dict | None:
+    if not last_result.get("dual"):
+        return last_result
+    if profile_key in ("tilek", "victoria"):
+        return last_result.get(profile_key, {})
+    return None
+
+
+def _handle_chat_edit(user_id: str, route: dict, say) -> None:
+    last = _get_last_result(user_id)
+    if not last:
+        say("У меня нет предыдущего результата для правки. Отправь описание вакансии целиком.")
+        return
+
+    target_result = _result_for_profile(last, route.get("profile_key"))
+    if target_result is None:
+        say("Не понял профиль для правки. Напиши `Tilek` или `Victoria`.")
+        return
+
+    instruction = route["instruction"]
+    target_type = route["target_type"]
+
+    if target_type == "variant":
+        variant_index = route.get("variant_index")
+        variants = target_result.get("proposal_variants") or []
+        if variant_index is None or variant_index < 0 or variant_index >= len(variants):
+            say("Не нашёл такой вариант. Доступны варианты 1, 2 и 3.")
+            return
+
+        variant = variants[variant_index]
+        say(f"Применяю правку к варианту {variant_index + 1}...")
+        refined = _run_async(refine_letter(
+            previous_letter=variant.get("cover_letter", ""),
+            previous_screening="",
+            user_instruction=instruction + "\nApply this only to this proposal variant. Return screening_answers as an empty string.",
+            api_key=OPENAI_API_KEY,
+        ))
+        variant["cover_letter"] = refined.get("cover_letter", variant.get("cover_letter", ""))
+        _save_last_result(user_id, last)
+        say(format_single_variant_message(variant, variant_index))
+        return
+
+    if target_type == "screening":
+        say("Применяю правку к ответам на вопросы...")
+        refined = _run_async(refine_letter(
+            previous_letter="",
+            previous_screening=target_result.get("screening_answers", ""),
+            user_instruction=instruction + "\nApply this only to screening_answers. Return cover_letter as an empty string.",
+            api_key=OPENAI_API_KEY,
+        ))
+        target_result["screening_answers"] = refined.get("screening_answers", target_result.get("screening_answers", ""))
+        _save_last_result(user_id, last)
+        say(f"*Updated screening answers:*\n```{target_result.get('screening_answers', '')}```")
+        return
+
+    say("Применяю правку к основному письму...")
+    refined = _run_async(refine_letter(
+        previous_letter=target_result.get("cover_letter", ""),
+        previous_screening=target_result.get("screening_answers", ""),
+        user_instruction=instruction,
+        api_key=OPENAI_API_KEY,
+    ))
+    target_result["cover_letter"] = refined.get("cover_letter", target_result.get("cover_letter", ""))
+    if "screening_answers" in refined:
+        target_result["screening_answers"] = refined.get("screening_answers", target_result.get("screening_answers", ""))
+    _save_last_result(user_id, last)
+    say(f"*Updated main letter:*\n```{target_result.get('cover_letter', '')}```")
+
+
+def _handle_chat_question(user_id: str, question: str, say) -> None:
+    last = _get_last_result(user_id)
+    if not last:
+        say("У меня нет предыдущего результата, по которому можно ответить. Отправь описание вакансии целиком.")
+        return
+    say("Смотрю последний результат...")
+    answer = _run_async(answer_about_last_result(last, question, OPENAI_API_KEY))
+    say(answer)
+
+
+def _handle_followup_route(user_id: str, route: dict, say) -> bool:
+    action = route.get("action")
+    if action == "edit":
+        _handle_chat_edit(user_id, route, say)
+        return True
+    if action == "question":
+        _handle_chat_question(user_id, route.get("question", ""), say)
+        return True
+    if action == "clarify":
+        _save_pending_clarification(user_id, route)
+        say(route.get("message", "Уточни, что именно нужно поправить."))
+        return True
+    return False
+
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -269,14 +551,20 @@ def handle_direct_message(message, say):
         return
 
     # Сначала пробуем распознать как команду-правку
-    refine_instruction = detect_refine_instruction(user_text)
-    if refine_instruction:
-        logger.info(f"🔧 Refine для {user_id}: {refine_instruction[:80]}")
-        try:
-            _handle_refine(user_id, refine_instruction, say)
-        except Exception as e:
-            logger.exception("refine failed")
-            say(f"❌ Ошибка при правке: {e}")
+    last_result = _get_last_result(user_id)
+    pending = _pop_pending_clarification(user_id)
+    try:
+        if pending and last_result:
+            route = resolve_pending_followup(pending, user_text, last_result)
+            if _handle_followup_route(user_id, route, say):
+                return
+        elif last_result:
+            route = classify_followup_message(user_text, last_result)
+            if _handle_followup_route(user_id, route, say):
+                return
+    except Exception as e:
+        logger.exception("follow-up handling failed")
+        say(f"❌ Ошибка при обработке уточнения: {e}")
         return
 
     say("⏳ Обрабатываю вакансию... Это может занять до минуты.")

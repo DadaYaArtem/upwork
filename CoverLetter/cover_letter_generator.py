@@ -841,6 +841,58 @@ Respond with JSON only:
                 "note": f"refine failed: {e}"}
 
 
+def _compact_result_for_chat(result: dict) -> dict:
+    if result.get("dual"):
+        return {
+            "dual": True,
+            "tilek": _compact_result_for_chat(result.get("tilek", {})),
+            "victoria": _compact_result_for_chat(result.get("victoria", {})),
+            "screening_questions": result.get("_screening_questions", []),
+        }
+
+    return {
+        "job_evaluation": result.get("job_evaluation", {}),
+        "selected_profile": result.get("selected_profile", {}),
+        "selected_cases": result.get("selected_cases", []),
+        "hook_options": result.get("hook_options", []),
+        "selected_hook": result.get("selected_hook", ""),
+        "cover_letter": result.get("cover_letter", ""),
+        "screening_answers": result.get("screening_answers", ""),
+        "proposal_variants": result.get("proposal_variants", []),
+    }
+
+
+async def answer_about_last_result(last_result: dict, user_question: str, api_key: str) -> str:
+    client_local = AsyncOpenAI(api_key=api_key)
+    context_json = json.dumps(_compact_result_for_chat(last_result), ensure_ascii=False, indent=2)
+    prompt = f"""You answer internal Slack follow-up questions about the latest Upwork proposal result.
+Use only the stored result below. Do not invent project facts, rates, cases, or job details.
+If the user asks which proposal variant is strongest, compare the main letter and variants by
+specificity, fit to the job, and usefulness for winning a reply.
+
+Answer in the same language as the user's question when obvious. Keep it concise.
+
+STORED RESULT:
+{context_json[:20000]}
+
+USER QUESTION:
+{user_question}
+"""
+    try:
+        response = await client_local.chat.completions.create(
+            model=MAIN_MODEL,
+            messages=[
+                {"role": "system", "content": "You answer questions about a generated Upwork proposal. Be concise and factual."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"answer_about_last_result error: {e}")
+        return f"Не смог ответить по последнему результату: {e}"
+
+
 # -----------------------------------------------------------------------------
 # Основной пайплайн
 # -----------------------------------------------------------------------------
