@@ -1,4 +1,19 @@
-# main_api.py
+# cover_letter_generator.py
+# -----------------------------------------------------------------------------
+# Изменения относительно прежней версии:
+#  1. Промпт основной генерации полностью на английском (единый язык output).
+#  2. Screening-вопросы извлекаются ОТДЕЛЬНЫМ дешёвым вызовом до главного шага.
+#     В основной промпт уже приходит готовый numbered list + команда ответить на все.
+#  3. Few-shot примеры писем (2 Tilek + 2 Victoria) — взяты из реальной истории
+#     в CSV. Они дают модели стиль вместо догадок по правилам.
+#  4. Hook anchor rule: каждый hook обязан явно сослаться на конкретный фрагмент
+#     job description. Без привязки — score < 5, такой hook не выбирается.
+#  5. Основная модель — gpt-4o. gpt-4o-mini оставлен только для дешёвых детекторов.
+#  6. letter_template убран как общий шаблон (он тянул "Best, Tilek" даже под Victoria).
+#  7. Добавлена функция refine_letter — для команд "translate to english",
+#     "shorter", "more technical" из Slack-бота без повторного RAG.
+# -----------------------------------------------------------------------------
+
 import os
 import asyncio
 import json
@@ -18,7 +33,6 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend import rag
 
-# Загрузка переменных окружения (локально из .env, на Railway — системные env vars)
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -27,9 +41,14 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# ----------------------------------------------------------------------
-# 1. Профили пользователей (полные данные)
-# ----------------------------------------------------------------------
+# Какие модели использовать
+MAIN_MODEL = os.getenv("COVER_LETTER_MAIN_MODEL", "gpt-4o")          # для письма
+HELPER_MODEL = os.getenv("COVER_LETTER_HELPER_MODEL", "gpt-4o-mini") # для детекторов
+
+
+# -----------------------------------------------------------------------------
+# Профили
+# -----------------------------------------------------------------------------
 user_profiles = [
     {
         "name": "Tilek Chubakov",
@@ -37,58 +56,43 @@ user_profiles = [
         "skills": [
             "ETL/ELT pipelines with dbt and scalable data warehousing",
             "Data lake and lakehouse architectures for analytics and ML",
-            "High-performance data systems optimized for cost and latency",
-            "AWS, Google Cloud, and Microsoft Azure infrastructure",
-            "Docker and Kubernetes for scalable deployments",
-            "CI/CD pipelines with GitHub Actions and GitLab CI/CD",
-            "Event-driven systems with Kinesis, Event Hubs, and RabbitMQ",
-            "Docker, AWS, RAG, LangChain, LLM fine-tuning",
-            "Hugging Face Transformers",
-            "Prompt engineering, tool usage, and context-aware pipelines",
-            "Autonomous workflows integrating APIs, databases, and enterprise systems",
-            "Real-time decision systems replacing manual operations",
+            "AWS, GCP, Azure infrastructure; Docker and Kubernetes",
+            "RAG, LangChain, LLM fine-tuning, Hugging Face Transformers",
+            "Prompt engineering, tool usage, context-aware pipelines",
+            "Autonomous workflows integrating APIs, databases, enterprise systems",
             "End-to-end ML pipelines with MLflow and Kubeflow",
-            "Time-series forecasting with Prophet and ARIMA",
-            "Gradient boosting using XGBoost, LightGBM, and CatBoost",
-            "Deep learning with PyTorch and TensorFlow on GPU infrastructure",
-            "Supervised and unsupervised learning for anomaly detection, fraud detection, and risk modeling",
-            "Named entity recognition, classification, and semantic search",
-            "Knowledge retrieval systems and question-answering pipelines",
-            "Contract analysis, invoice automation, and compliance validation",
-            "Multilingual NLP and morphologically rich language processing",
-            "Batch and streaming pipelines using Apache Spark, Apache Kafka, and Apache Airflow",
-            "Cloud-native architectures with BigQuery, Dataflow, Pub/Sub, and Snowflake",
-            "Hadoop, Hive, Spark (Databricks), Kafka (Confluent), Airflow, DataFlow, Pub/Sub, Kinesis, RabbitMQ, Event Hubs, NiFi, Stitch, Great Expectations",
-            "Apache Superset, Tableau, Looker, Power BI",
-            "Python, C#, Scala, Java, R, JavaScript, VB.NET, C/C++, shell scripting",
-            "sci-kit learn, PyTorch, TensorFlow, Kubeflow, MLflow",
-            "Snowflake, MySQL, PostgreSQL, MS SQL Server, MongoDB, Cassandra, HBase, Oracle, Redis, Amazon Redshift",
-            "AWS (EC2, S3, RDS, Lambda, Redshift, Glue, Kinesis)",
-            "Azure (Function Apps, Event Hubs, Data Explorer, Storage)",
-            "GCP (Cloud Functions, Pub/Sub, BigQuery, Cloud Run)",
-            "HTML/CSS, React, Node.js, Flask, Express, FastAPI",
-            "Docker, Kubernetes, Terraform",
-            "Git, GitLab CI/CD, GitHub Actions, dbt, Fivetran, CircleCI, SSIS, CDK"
+            "Time-series forecasting (Prophet, ARIMA); XGBoost, LightGBM, CatBoost",
+            "PyTorch, TensorFlow on GPU infrastructure",
+            "NER, classification, semantic search, RAG, QA systems",
+            "Apache Spark, Kafka, Airflow; BigQuery, Snowflake, Redshift",
+            "Python, C#, Scala, Java, R, JavaScript",
+            "PostgreSQL, MongoDB, Cassandra, Redis, MS SQL Server, Oracle",
+            "AWS Lambda, Glue, Kinesis; GCP Pub/Sub, BigQuery, Cloud Run",
+            "Azure Function Apps, Event Hubs, Data Explorer",
+            "Node.js, React, Flask, FastAPI on the integration layer",
+            "Terraform, GitLab CI/CD, GitHub Actions, dbt, Fivetran"
         ],
         "min_salary_per_hour_usd": 50,
         "priority_cases": [
             "Scale AI", "Arcade", "Deverus", "Generative AI Marketplace",
             "AI Identity Verification", "CryptoPay", "LLM Chatbot & RAG System",
             "AI Document Processing", "FinTech Payment System"
-        ]
+        ],
+        "signature": "Best,\nTilek",
+        "github": "https://github.com/tilekchubakov"
     },
     {
         "name": "Victoria",
         "position": "Senior Full-Stack Developer, React, Node.js, Scalable SaaS",
         "skills": [
             "Full-stack development with React and Node.js for scalable web applications",
-            "Frontend engineering with React, Next.js, TypeScript, Redux, Tailwind CSS",
-            "Backend development using Node.js and Express.js for REST API architecture",
-            "SaaS platform development with multi-tenant systems and cloud infrastructure",
-            "Database design with PostgreSQL and MongoDB, including performance optimization",
-            "API integrations, authentication, and secure data handling",
-            "Cloud deployment with AWS, Docker, and CI/CD pipelines",
-            "Cross-platform development using Flutter and React Native"
+            "Frontend with React, Next.js, TypeScript, Redux, Tailwind",
+            "Backend with Node.js and Express for REST API architecture",
+            "SaaS platforms, multi-tenant systems, cloud infrastructure",
+            "PostgreSQL and MongoDB schema design and performance tuning",
+            "API integrations, authentication, secure data handling",
+            "AWS, Docker, CI/CD pipelines",
+            "Cross-platform with Flutter and React Native"
         ],
         "min_salary_per_hour_usd": 40,
         "min_salary_agency_usd": 35,
@@ -96,123 +100,159 @@ user_profiles = [
             "Scale AI", "Arcade", "Deverus", "Generative AI Marketplace",
             "AI Identity Verification", "CryptoPay", "LLM Chatbot & RAG System",
             "AI Document Processing", "FinTech Payment System"
-        ]
+        ],
+        "signature": "Best,\nViktoryia"
     },
     {
         "name": "Vicode Solutions",
         "position": "Full-Cycle Software Development Agency, React, Node.js, Scalable SaaS, 350+ developers",
         "skills": [
-            "Responsive, high-performance interfaces using React, Next.js, TypeScript, Redux, and Tailwind CSS - clean architecture, intuitive UX, and optimized performance",
-            "Robust server-side systems with Node.js and Express.js, secure RESTful APIs, and scalable infrastructures powered by PostgreSQL and MongoDB",
-            "Authentication systems, third-party service integrations, and cloud deployment with CI/CD pipelines",
-            "Full-stack SaaS application development",
-            "React & Next.js frontend architecture",
-            "Node.js backend systems and REST API design",
-            "Database modeling with PostgreSQL and MongoDB",
-            "Multi-tenant platforms and subscription-based products",
-            "Payment integrations and secure authentication",
-            "Cloud infrastructure and DevOps workflows"
+            "Responsive React, Next.js, TypeScript, Redux, Tailwind interfaces",
+            "Node.js and Express backends, REST API design",
+            "PostgreSQL and MongoDB modeling for multi-tenant SaaS",
+            "Auth, third-party integrations, cloud deployment with CI/CD",
+            "Full-stack SaaS application development, payment integrations"
         ],
         "min_salary_per_hour_usd": 35,
         "priority_cases": [
             "Scale AI", "Arcade", "Deverus", "Generative AI Marketplace",
             "AI Identity Verification", "CryptoPay", "LLM Chatbot & RAG System",
             "AI Document Processing", "FinTech Payment System"
-        ]
+        ],
+        "signature": "Best,\nViktoryia, Vicode Solutions\nhttps://vicode.solutions/portfolio"
     },
 ]
 
-# ----------------------------------------------------------------------
-# 3. Базовые правила отбора работы
-# ----------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Базовые правила отбора работы
+# -----------------------------------------------------------------------------
 selection_rules = {
     "duration_months": 2,
     "preferred_work_hours_per_week": 30,
-    "red_flags": """No job details, too niche stack (GHL-only, OpenClaw-only, n8n-only),
-                 geo restrictions that exclude the profile, screen-recorded assessments,
-                 Loom mandatory with no alternative."""
+    "red_flags": (
+        "No job details, too niche stack (GHL-only, OpenClaw-only, n8n-only), "
+        "geo restrictions that exclude the profile, screen-recorded assessments, "
+        "Loom mandatory with no alternative, unpaid test tasks."
+    )
 }
 
-# ----------------------------------------------------------------------
-# 4. Правила составления письма
-# ----------------------------------------------------------------------
-cover_letter_rules = """
-Structure: each case contains project name, client URL or Upwork portfolio link, tech stack (technologies used), industry or niche, role description (what was built), key results with metrics, and a priority flag.
 
-Case 1 (required) must come from the Upwork portfolio. Pick the most relevant Upwork case by stack, niche, and problem type.
+# -----------------------------------------------------------------------------
+# Правила оформления письма — единым английским блоком
+# -----------------------------------------------------------------------------
+cover_letter_rules = """\
+COVER LETTER RULES (English only — never mix languages inside the letter).
 
-Case 2 (best match) is the single most relevant case from the combined pool: Upwork portfolio plus full Interexy case database. There is no hierarchy between the two sources; relevance wins. The system uses the full internal case database to determine best fit.
+Length: 150-200 words. Plain paragraphs only. No bullet points, no headers, no bold.
+Allowed punctuation for separators: hyphen-minus only (-). Never use em dash or en dash.
+If the client name is visible in the job post, start with it ("Hi <Name>,"). Otherwise use "Hi there,".
 
-Case Matching Logic
-Match by stack keywords from the job's mandatory skills section. Match by industry or niche. Match by problem type (real-time systems, payments, AI integration, healthcare, etc.). Case 1 is always from the Upwork portfolio. Case 2 is the best-matching case from either the Upwork portfolio or the full Interexy case database, whichever is more relevant. Maximum 2 cases per letter. Never use the same case in both Tilek and Victoria letters for the same job.
+Structure (each block is 1-3 sentences, separated by blank lines):
+  1. HOOK - one or two sentences naming a concrete technical risk, architectural pitfall,
+     or business pain that is OBSERVABLE in the job description. Must quote or paraphrase
+     a specific fragment of the job text. Never start with "Most...". Conversational openers
+     like "Let me be honest", "From what I see", "You are not considering the significant
+     technical risk...", "To be honest..." are fine. No generic compliments.
+  2. BRIDGE - one sentence connecting the hook to what you do. Mention 2-3 mandatory
+     skill keywords from the job (woven into the sentence, never listed).
+  3. CASE 1 - "ClientName - https://link". Then one or two sentences: what was built,
+     stack used, one concrete metric. Pull from the provided RAG cases. Never invent links.
+  4. CASE 2 - same format. Different case from Case 1. Different aspect of the project
+     than Case 1 if relevant.
+  5. CLOSING - years of experience + stack match + availability (40 hrs/week) + hourly
+     rate (skip if fixed-price). Add "available to start immediately" if the post signals
+     urgency. If a test task is mentioned, state it is completed on a paid basis only.
+  6. CTA - exactly "Let's talk." on its own line.
+  7. SIGNATURE - profile-specific signature provided in the profile.
 
-Output Block 3: two selected cases with a one-line explanation of why each was chosen.
+Keyword integration: weave 3-5 mandatory-skill keywords from the job into the case
+descriptions or closing. Never list them.
 
-Keyword Integration Rules
-Source: mandatory skills section of the job posting. Naturally weave three to five mandatory skill keywords into the cover letter body. Never list them. Always embed them in the context of case descriptions or the closing statement.
+Mandatory: if the job post contains any specific instructions (answer N questions,
+include a phrase, mention a timeline) - follow them. Missing a stated requirement is
+an auto-fail and the letter must not be submitted.
 
-Example: mandatory skills: React, Node.js, Supabase, TypeScript → "Built a production-grade React and Node.js platform with TypeScript throughout and Supabase as the real-time data layer."
-
-Cover Letter Generation Pipeline
-
-Step 1 - Job Evaluation: assess duration, hours, budget, stack fit, red flags. Output PASS or SKIP with reasoning. Stop if SKIP.
-
-Step 2 - Profile Selection: determine Tilek / Victoria / Vicode Solutions / both. If both, run the pipeline twice independently.
-
-Dual-profile rule (when both Tilek and Victoria letters are generated): cases must be completely different; no case can appear in both letters. Letter texts must be meaningfully distinct in hook, framing, and angle - not paraphrases of each other. Screening question answers must also differ; each answer written from the respective profile's perspective with different cases and different language.
-
-Step 3 - Hook Generation: generate two or three hook options for the user to choose from, or auto-select the strongest one.
-
-Hook Rules: never start with "Most...". Use conversational openers only: "Let me be honest...", "From what I see...", "To be honest...", "Let me be direct...". The hook must address a specific technical risk or business pain visible in the job description. One or two sentences maximum. No generic compliments to the client.
-
-Step 4 - Case Selection: pull the two most relevant Priority 1 cases. Format per case: name plus link (if available) plus one or two lines on what was built and with which stack, plus a key result with metric.
-
-Step 5 - Closing Statement: one or two sentences containing years of experience, core stack match to job requirements, availability (40 hours/week), and hourly rate (omit if fixed price).
-
-Immediate start rule: if the job posting indicates the client wants to start immediately, within a few days, or urgently, include in the closing statement that the selected profile is available to start immediately.
-
-Step 6 - CTA and Signature: CTA is always "Let's talk." Signature formats: for a solo profile (Tilek or Victoria) use "Best, [Name]". For the agency angle (Vicode Solutions) use "Best, [Name], Vicode Solutions / vicode.solutions/portfolio". For Tilek on technical roles, add "https://github.com/tilekchubakov" on a separate line.
-
-Step 7 - Screening Questions (if present): detect if the job posting contains a screening questions block (for example, "You will be asked to answer the following questions" or similar). If yes, generate answers as a separate output block; never mix them into the letter body.
-
-Format per answer: use a numbered list matching the job's question order. For "Describe recent experience" or any request to describe a case or project, answer in full detail: project name plus link, what the product does, the client's pain point, the solution built, tech stack, role on the project, and measurable results. Never give a brief or summary answer to this type of question. For technical questions, give a precise technical answer. For "Do you have certifications?" use a standard answer referencing production experience. Include GitHub or portfolio links where relevant. When both Tilek and Victoria answers are generated, each must use different cases and different language.
-
-Cover Letter Structure
-
-Block 1 Hook: one or two sentences, conversational, addresses a specific pain or risk from the job description.
-Block 2 Bridge: one sentence connecting the hook to the solution being offered.
-Block 3 Case 1: name and link on the same line, followed by one or two lines describing what was built, stack used, and a key result with metric.
-Block 4 Case 2: same format as Case 1.
-Block 5 Closing: years of experience plus stack match plus availability plus rate if hourly, plus "available to start immediately" if the job is urgent.
-Block 6 CTA: "Let's talk."
-Block 7 Signature: "Best, [Name]" plus optional portfolio/GitHub line.
-
-Formatting Rules
-Use hyphen-minus ( - ) only, never em dash ( — ) or en dash ( – ). No bold text inside the letter. No bullet points inside the letter. No headers inside the letter. Use plain paragraphs only. The case name and link appear on the same line, for example: Classful - https://classful.com. Letter length is 150-200 words maximum. Screening answers are always a separate block, never inside the letter. If the job posting contains specific instructions (answer questions, provide a timeline, include something particular), always follow them without exception. Missing a stated requirement is an automatic disqualifier.
-
-Edge Cases
-If the client name is known, open the letter with the client name. If the client name is unknown, use no greeting or just "Hi there". If a Loom is mandatory, write that a Loom will be sent upon response. If an NDA is required, acknowledge willingness to sign in the closing. If "Agency preferred" is stated, use the Vicode Solutions angle. For a fixed price job, do not mention a rate anywhere in the letter. For an hourly job, include the rate in the closing statement. If a screen-recorded assessment is required, flag it to the user and ask whether to proceed. If both AI and fullstack are required, generate two letters independently. If the job requires a test task or assessment, state in the letter that test tasks are completed on a paid basis only, and that the terms can be discussed separately; never agree to unpaid test tasks. If an urgent start or start within days is required, include in the closing that the profile is available to start immediately.
+Cases sourcing: Case 1 should be the strongest Upwork-portfolio match by stack/niche
+when available; Case 2 the best from the combined pool. If both letters (Tilek + Victoria)
+are generated for the same job, they must use completely different cases and have
+meaningfully different framing.
 """
 
-# ----------------------------------------------------------------------
-# 5. Шаблон письма-отклика
-# ----------------------------------------------------------------------
-letter_template = """
-From what I see - this is less about building a shoe store and more about building a conversion machine that happens to sell shoes.
-Performance, SEO, and clean architecture from day one - that's where I focus.
-Arcade - https://arcade.ai
-AI-powered marketplace handling thousands of concurrent requests. Built scalable backend infrastructure and React frontend optimized for high-load, real-time user interactions.
-Classful - https://classful.com
-EdTech SaaS, 1M+ MAU. Stripe integration, PostgreSQL optimization, page load speed improved by 55%. Conversion rate up 30%.
-15+ years building scalable backend systems. I'll make sure your store is fast, clean, and ready to grow.
+
+# -----------------------------------------------------------------------------
+# Few-shot примеры (взяты из реальной истории Tilek/Vika)
+# -----------------------------------------------------------------------------
+TILEK_EXAMPLES = """\
+EXAMPLE 1 (Tilek, Shopify + React + Python + AWS job):
+You are not considering the significant technical risk which can cost you $150k when React + Python systems are scaled on AWS without proper Terraform, API boundaries, and cloud cost control.
+
+I build full-stack platforms using React for complex admin UIs, Python for backend services, AWS Lambda for scalable workloads, GraphQL for stable data contracts, and Terraform for fully reproducible infrastructure.
+
+On Deverus - https://www.deverus.com/ - a large-scale background screening platform, I rebuilt core flows with React frontend, Python services on AWS, and cloud automation, cutting onboarding drop-off by 74% and supporting millions of checks monthly.
+
+On Arcade AI - https://www.arcade.ai/ - an AI-powered SaaS marketplace, I delivered scalable React/Next.js frontends with AI-driven logic stable enough for production traffic and monetization.
+
+Working with me means a senior engineer who designs systems to survive real traffic and audits, not just pass initial QA - I proactively eliminate AWS cost leaks and infra drift.
+
+Let's talk.
+Best,
+Tilek
+
+EXAMPLE 2 (Tilek, AI SaaS on React + Next.js + Supabase):
+Roy and Mateusz, you are not considering the significant technical risk which can cost you $180k when AI-driven SaaS platforms are built without proper data ingestion pipelines, agent orchestration, and clean frontend-backend boundaries.
+
+I build AI SaaS platforms using React and Next.js for production UI, Supabase for auth and real-time data, and OpenAI for RAG pipelines and multi-agent orchestration.
+
+On Arcade AI - https://www.arcade.ai/ - I delivered a scalable React/Next.js frontend integrated with AI-driven logic and stabilized the platform for real user traffic.
+
+On Deverus - https://www.deverus.com/ - I rebuilt a regulated multi-tenant SaaS with React/Node, REST APIs, and optimized DB structure - same architectural pattern your platform needs.
+
+Available 40 hrs/week at $50/hr, ready to start immediately.
+
 Let's talk.
 Best,
 Tilek
 """
 
-# ----------------------------------------------------------------------
-# Путь к папке с кейсами (относительно корня проекта)
-# ----------------------------------------------------------------------
+VICTORIA_EXAMPLES = """\
+EXAMPLE 1 (Victoria, HIPAA full-stack):
+Hi Jason,
+
+This is a backend ownership problem - multi-tenant data isolation, HIPAA-compliant infrastructure, and a clean API layer a real clinic can trust from day one. The frontend is done; the hard part is everything underneath it.
+
+I work as a senior full-stack engineer owning Node.js/Fastify backends and React frontends end to end - PostgreSQL schema design, REST API boundaries, auth, and production delivery. Fluent in TypeScript, Prisma and Supabase, and Redis-backed async infrastructure.
+
+On Renegade Health - https://renegade.health/ - a HIPAA-regulated telemedicine platform, I led compliance audit prep: PHI access controls, audit logging, architectural sign-off. Stack: Node.js, TypeScript, PostgreSQL, GCP.
+
+On Deverus - https://www.deverus.com/ - a regulated multi-tenant SaaS, I worked on backend redesign and a blockchain-based digital wallet for document verification - another environment where data isolation wasn't optional.
+
+Available immediately, 40 hrs/week, $40/hr.
+
+Let's talk.
+Best,
+Viktoryia
+
+EXAMPLE 2 (Victoria, marketplace):
+Hi Sara,
+
+Building a marketplace is an architecture decision made at the start that determines whether the platform scales cleanly or becomes a bottleneck six months in. Vendor profiles, listings, payment flows, and AI integrations all need to be designed as a system.
+
+I own projects like this end to end - from the first database schema to a vendor listing a product and a buyer completing a payment. Fewer handoffs, faster decisions, no gap between design and build.
+
+On Arcade - https://www.arcade.ai/ - an AI-powered generative design marketplace, I built the React frontend and Node.js backend orchestrating AI/ML models, real-time 3D previews, and artisan order workflows - reducing product design time from days to minutes.
+
+On Nash.io - https://nash.io/ - a digital asset trading platform, I delivered real-time frontend architecture with React and WebSocket on AWS.
+
+Let's talk.
+Best,
+Viktoryia
+"""
+
+
+# -----------------------------------------------------------------------------
+# Загрузка кейсов
+# -----------------------------------------------------------------------------
 CASES_DIR = Path(__file__).parent.parent / "backend" / "knowledge_base" / "cases"
 
 
@@ -226,9 +266,302 @@ async def load_case_content(case_id: str) -> str:
 
 
 def fix_newlines(text: str) -> str:
+    if not text:
+        return text
     text = text.replace('\\n', '\n')
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text
+
+
+# -----------------------------------------------------------------------------
+# Детектор dual-profile (без изменений по логике)
+# -----------------------------------------------------------------------------
+async def detect_dual_profile(job_description: str, api_key: str) -> bool:
+    client_local = AsyncOpenAI(api_key=api_key)
+    prompt = (
+        "Analyze this job description and determine if it requires BOTH:\n"
+        "- AI/ML skills (LLM, Python ML/data, RAG, MLOps, AI agents, NLP, data engineering)\n"
+        "- AND fullstack development skills (React, Node.js, SaaS frontend/backend, web app development)\n\n"
+        "A job qualifies as dual-profile ONLY if it genuinely requires deep expertise in BOTH areas "
+        "simultaneously — not just passing familiarity with one while being primarily the other.\n\n"
+        "Respond with JSON only: {\"dual_profile\": true} or {\"dual_profile\": false}\n\n"
+        "Job description:\n" + job_description
+    )
+    try:
+        response = await client_local.chat.completions.create(
+            model=HELPER_MODEL,
+            messages=[
+                {"role": "system", "content": "You analyze job requirements. Respond only with JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(response.choices[0].message.content)
+        return bool(result.get("dual_profile", False))
+    except Exception as e:
+        print(f"dual_profile detection error: {e}")
+        return False
+
+
+# -----------------------------------------------------------------------------
+# НОВОЕ: отдельный шаг извлечения screening-вопросов
+# -----------------------------------------------------------------------------
+async def extract_screening_questions(job_description: str, api_key: str) -> List[str]:
+    """
+    Вытаскивает из job description все вопросы, на которые клиент явно
+    или неявно просит ответить. Возвращает список строк.
+    Если вопросов нет — возвращает [].
+    """
+    client_local = AsyncOpenAI(api_key=api_key)
+    prompt = f"""You are extracting questions a freelancer must answer in their cover letter.
+
+Read the job posting below and return EVERY question or explicit instruction-to-describe that
+appears in it. Capture all of these patterns:
+
+  - Numbered or bulleted lists of questions ("1. What is your...  2. How would you...").
+  - Questions in prose ending with "?".
+  - Imperative requests for information ("Please describe your experience with X",
+    "Tell us about a similar project", "Share your timeline and budget",
+    "Explain your approach to Y", "What is your hourly rate?").
+  - Sections that start with phrases like "You will be asked to answer the following",
+    "Please answer these questions", "In your proposal please include", "When applying,
+    cover the following".
+  - Any explicit checklist of items the client wants in the proposal (timeline, rate, samples,
+    portfolio link, availability) - capture each item as a separate question.
+
+Rules:
+  - Return each item as a clean single-sentence question. If the original is imperative
+    ("Please share your timeline"), convert it to a question ("What is your timeline?").
+  - Preserve the order they appear in the post.
+  - Do NOT invent questions that are not in the post.
+  - Do NOT include generic application etiquette (e.g. "are you interested?").
+  - If there are no questions at all, return an empty list.
+
+Job description:
+\"\"\"
+{job_description}
+\"\"\"
+
+Respond with JSON only in this exact shape:
+{{ "questions": ["question 1", "question 2", ...] }}
+"""
+    try:
+        response = await client_local.chat.completions.create(
+            model=HELPER_MODEL,
+            messages=[
+                {"role": "system", "content": "You extract screening questions. Respond only with JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(response.choices[0].message.content)
+        questions = result.get("questions", [])
+        # дешёвый sanity-check
+        return [q.strip() for q in questions if isinstance(q, str) and q.strip()]
+    except Exception as e:
+        print(f"screening extraction error: {e}")
+        return []
+
+
+# -----------------------------------------------------------------------------
+# Google Sheets логгер (без изменений)
+# -----------------------------------------------------------------------------
+def append_to_google_sheet(job_description: str, profile_name: str, cover_letter: str, screening_answers: str = ""):
+    try:
+        creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
+        spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
+        worksheet_name = os.getenv("GOOGLE_SHEETS_WORKSHEET_NAME", "Sheet1")
+
+        if not creds_json or not spreadsheet_id:
+            print("⚠️ Google Sheets credentials not configured, skipping logging")
+            return
+
+        creds_dict = json.loads(creds_json)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client_gspread = gspread.authorize(creds)
+
+        sheet = client_gspread.open_by_key(spreadsheet_id).worksheet(worksheet_name)
+        now = datetime.now().isoformat()
+
+        job_preview = job_description[:5000] + "..." if len(job_description) > 5000 else job_description
+        letter_preview = cover_letter[:5000] + "..." if len(cover_letter) > 5000 else cover_letter
+        screening_preview = screening_answers[:5000] + "..." if len(screening_answers) > 5000 else screening_answers
+
+        row = [now, job_preview, profile_name, letter_preview, screening_preview]
+        sheet.append_row(row)
+        print(f"✅ Записано в Google Sheets: {profile_name} - PASS")
+    except Exception as e:
+        import traceback
+        print(f"❌ Ошибка записи в Google Sheets: {e}")
+        traceback.print_exc()
+
+
+# -----------------------------------------------------------------------------
+# ГЛАВНЫЙ ПРОМПТ — теперь на английском
+# -----------------------------------------------------------------------------
+def _build_main_prompt(
+    job_description: str,
+    cases_text: str,
+    profiles_to_use: list,
+    selection_rules: dict,
+    screening_questions: List[str],
+    forbidden_case_ids: Optional[List[str]],
+    examples_block: str,
+) -> str:
+    forbidden_note = ""
+    if forbidden_case_ids:
+        forbidden_note = (
+            "IMPORTANT - the following case IDs were already used in a parallel letter "
+            f"for this same job. Do NOT select them: {', '.join(forbidden_case_ids)}.\n"
+        )
+
+    if screening_questions:
+        screening_block = (
+            "SCREENING QUESTIONS DETECTED IN THE POST. You MUST answer every single one "
+            "in `screening_answers` as a numbered list, in the order shown below. "
+            "Skipping a question is an automatic disqualifier - in that case return "
+            "decision=SKIP with reasoning=\"cannot answer all screening questions\".\n\n"
+            "Questions to answer:\n"
+            + "\n".join(f"{i+1}. {q}" for i, q in enumerate(screening_questions))
+            + "\n\nFor each answer:\n"
+              "- Use the same numbering as above.\n"
+              "- For experience/project questions: name the case, give its link, what was built, "
+              "the client's pain, the stack, your role, and a measurable result. Never give a brief answer.\n"
+              "- For rate/availability/timeline questions: be specific (rate, hours, ETA).\n"
+              "- For certification questions: 'I do not have formal certifications, but I have "
+              "production experience verifiable through portfolio cases above.'\n"
+              "- For technical questions: give a precise technical answer.\n"
+              "- Always answer in English.\n"
+        )
+    else:
+        screening_block = (
+            "No screening questions were detected. Return `screening_answers` as an empty string."
+        )
+
+    profiles_json = json.dumps(profiles_to_use, indent=2, ensure_ascii=False)
+    selection_json = json.dumps(selection_rules, indent=2, ensure_ascii=False)
+
+    return f"""You are an expert proposal writer for Upwork IT jobs. You evaluate the job, pick the
+right profile from the provided list, choose 2 relevant cases from the RAG-retrieved pool,
+and produce a final proposal letter + screening answers.
+
+OUTPUT LANGUAGE
+All of these MUST be in English: `cover_letter`, `screening_answers`, every `hook_options[].text`,
+and `selected_hook`. Never mix languages inside any of these fields, not even single Russian
+words. The `reasoning` fields are also expected in English; if you must use Russian to be clear,
+that is acceptable ONLY inside reasoning fields, never inside output text shown to the client.
+
+JOB DESCRIPTION
+\"\"\"
+{job_description}
+\"\"\"
+
+RAG-RETRIEVED CASES (each with ID, name, client link, full content)
+{cases_text}
+
+CANDIDATE PROFILES
+{profiles_json}
+
+JOB-SELECTION BASE RULES
+{selection_json}
+
+COVER LETTER RULES
+{cover_letter_rules}
+
+REFERENCE EXAMPLES (style only - do NOT copy text or cases, do NOT mimic specific phrasing
+unless it fits the actual job):
+{examples_block}
+
+SCREENING DETECTION
+{screening_block}
+
+{forbidden_note}
+TASK STEPS
+
+1. JOB EVALUATION. PASS or SKIP based on:
+   - duration_months: shorter is fine if everything else fits.
+   - preferred_work_hours_per_week: SKIP if the job demands more.
+   - red_flags from base rules - any match = SKIP with explanation.
+   - Stack/experience fit.
+   Output decision + short reasoning + flags (e.g. "urgent_start, test_task_required").
+
+2. PROFILE SELECTION. From the allowed profiles, pick ONE:
+   - Stack match against the job's mandatory skills section.
+   - Rate gate: Tilek minimum $50/hr; Victoria solo minimum $40/hr; Vicode Solutions
+     (agency) minimum $35/hr. If budget below applicable minimum - profile does not qualify.
+   - Priority cases that overlap with job stack/industry are a plus.
+   If no profile fits, return name=null with reasoning.
+
+3. CASE SELECTION. For the chosen profile, pick the 2 most relevant cases from the RAG list above.
+   For each: case_id, name, external client link, one-sentence reasoning. Exclude links
+   that point to interexy domains or app stores (apps.apple.com, play.google.com,
+   playmarket). Leave link empty if no clean external client link is available.
+   Never use the same case twice.
+   {forbidden_note}
+
+4. HOOK GENERATION. Produce exactly 3 hook options for Block 1.
+   HARD REQUIREMENT: each hook MUST reference a concrete detail observable in THIS job
+   description - a specific technology mentioned, a concrete risk implied by the stated
+   architecture, a specific business goal, a stated constraint, or a unique combination of
+   requirements. A hook that would also work for an unrelated job is a failure.
+   Rules:
+     - Never start with "Most...".
+     - Use conversational openers: "Let me be honest", "From what I see",
+       "You are not considering the significant technical risk...", "To be honest",
+       "<Client name>, you are not considering...", or similar.
+     - 1-2 sentences max.
+   Score each hook 0-10 on specificity. Specificity rubric:
+     - 9-10: cites or paraphrases a specific phrase/requirement from the job.
+     - 6-8: references the exact stack combo and a plausible technical pitfall for it.
+     - 3-5: generic for the role family, no anchor to this job.
+     - 0-2: applies to almost any job.
+   Set `selected_hook` to the highest-scoring hook (must be >=6; if all are <6, regenerate
+   in your reasoning and try again before finalizing).
+
+5. COVER LETTER. Write the letter strictly following the cover letter rules. Use
+   `selected_hook` verbatim as Block 1. Use the cases selected in step 3, with the
+   profile's signature block from the profile JSON. For Tilek on technical roles add the
+   github line under the signature. 150-200 words.
+
+6. SCREENING ANSWERS. Generate per the SCREENING DETECTION block above.
+
+NEWLINES
+For `cover_letter`, `screening_answers`, and `selected_hook` use REAL newline characters
+inside the JSON string (this is valid JSON). Do not escape them as `\\n`. Separate paragraphs
+with one blank line (two newlines).
+
+OUTPUT FORMAT - STRICT JSON, NOTHING ELSE
+{{
+  "job_evaluation": {{
+    "decision": "PASS" or "SKIP",
+    "reasoning": "short reasoning",
+    "flags": "comma-separated flags or empty string"
+  }},
+  "selected_profile": {{
+    "name": "Tilek" or "Victoria" or "Vicode Solutions" or null,
+    "reasoning": "why chosen"
+  }},
+  "selected_cases": [
+    {{
+      "case_id": "id",
+      "name": "case name",
+      "link": "external client url or empty string",
+      "reasoning": "why this case fits"
+    }}
+  ],
+  "hook_options": [
+    {{"text": "hook variant 1", "specificity_score": 8}},
+    {{"text": "hook variant 2", "specificity_score": 6}},
+    {{"text": "hook variant 3", "specificity_score": 7}}
+  ],
+  "selected_hook": "text of the highest-scoring hook",
+  "cover_letter": "letter body with real newlines",
+  "screening_answers": "answers with real newlines, or empty string"
+}}
+"""
 
 
 async def evaluate_job_and_generate(
@@ -236,138 +569,63 @@ async def evaluate_job_and_generate(
         best_cases_with_content: list,
         user_profiles: list,
         selection_rules: dict,
-        cover_letter_rules: str,
-        letter_template: str,
         api_key: str,
-        allowed_profiles: list = None,
-        forbidden_case_ids: list = None
+        screening_questions: Optional[List[str]] = None,
+        allowed_profiles: Optional[List[str]] = None,
+        forbidden_case_ids: Optional[List[str]] = None
 ) -> dict:
     client_local = AsyncOpenAI(api_key=api_key)
     profiles_to_use = [p for p in user_profiles if allowed_profiles is None or p["name"] in allowed_profiles]
-    forbidden_note = ""
-    if forbidden_case_ids:
-        forbidden_note = f"IMPORTANT: The following case IDs were already used in another letter for this same job — do NOT select them: {', '.join(forbidden_case_ids)}."
+
+    # Подбираем few-shot блок под список разрешённых профилей,
+    # чтобы для Victoria-only не маячил "Best, Tilek".
+    if allowed_profiles == ["Tilek Chubakov"]:
+        examples_block = TILEK_EXAMPLES
+    elif allowed_profiles and "Tilek Chubakov" not in allowed_profiles:
+        examples_block = VICTORIA_EXAMPLES
+    else:
+        examples_block = TILEK_EXAMPLES + "\n\n" + VICTORIA_EXAMPLES
 
     cases_text = ""
     for idx, case in enumerate(best_cases_with_content, 1):
-        cases_text += f"\n=== КЕЙС {idx} ===\nID: {case.get('id')}\nНазвание: {case.get('name', 'Unknown')}\nСсылка: {case.get('link', 'N/A')}\nСодержание:\n{case.get('content', '')[:3000]}\n"
+        cases_text += (
+            f"\n=== CASE {idx} ===\n"
+            f"ID: {case.get('id')}\n"
+            f"Name: {case.get('name', 'Unknown')}\n"
+            f"Link: {case.get('link', 'N/A')}\n"
+            f"Content:\n{case.get('content', '')[:3000]}\n"
+        )
 
-    prompt = f"""
-    Ты – AI-ассистент по подбору персонала для IT-вакансий. Твоя задача – оценить вакансию, выбрать наиболее подходящего кандидата из списка профилей и сгенерировать готовое письмо-отклик и ответы на скрининг-вопросы (если есть).
+    prompt = _build_main_prompt(
+        job_description=rag_query,
+        cases_text=cases_text,
+        profiles_to_use=profiles_to_use,
+        selection_rules=selection_rules,
+        screening_questions=screening_questions or [],
+        forbidden_case_ids=forbidden_case_ids,
+        examples_block=examples_block,
+    )
 
-    ### Описание вакансии:
-    {rag_query}
-
-    ### Список релевантных кейсов компании (каждый с ID, названием, ссылкой и полным описанием):
-    {cases_text}
-
-    ### Профили кандидатов (JSON):
-    {json.dumps(profiles_to_use, indent=2, ensure_ascii=False)}
-
-    ### Базовые правила отбора работы (общие для всех кандидатов):
-    {json.dumps(selection_rules, indent=2, ensure_ascii=False)}
-
-    ### Правила оформления письма-отклика:
-    {cover_letter_rules}
-
-    ### Шаблон письма (может быть использован как основа, но нужно адаптировать под конкретную вакансию и профиль):
-    {letter_template}
-
-    ### Задание:
-    1. **Job Evaluation**: Проанализируй вакансию. Реши, стоит ли откликаться (PASS) или пропустить (SKIP). Учти:
-       - Длительность (duration_months): если вакансия короче указанного, всё равно можно PASS, если остальное подходит.
-       - Часы в неделю (preferred_work_hours_per_week): если вакансия требует больше, чем указано, то SKIP.
-       - Red flags: если в описании есть признаки, перечисленные в red_flags (например, "unpaid test task", "NDA without payment", "fixed price too low"), то SKIP с пояснением.
-       - Соответствие стека и опыта.
-
-       Выведи решение, краткое обоснование и любые флаги (например, "test task required", "urgent start").
-
-    2. **Profile Selection**: Если решение PASS, выбери одного кандидата из списка профилей, который лучше всего подходит под вакансию. Учти:
-       - Соответствие skills (особенно обязательным из описания вакансии).
-       - min_salary_per_hour: Tilek minimum is $50/hr. Victoria solo angle minimum is $40/hr. Victoria / Vicode Solutions agency angle minimum is $35/hr. If the job budget is below the applicable minimum, the candidate does not qualify.
-       - priority_cases: если у кандидата есть приоритетные кейсы, которые совпадают с индустрией/стеком вакансии – это плюс.
-       - Общий опыт и позиция.
-
-       Если ни один не подходит – укажи "None" и объясни причину.
-
-    3. **Case Selection**: Для выбранного кандидата выбери 2 наиболее релевантных кейса из предоставленного списка (из тех, что были получены через RAG). Учти приоритетные кейсы кандидата (если они есть в списке). Для каждого кейса дай:
-       - ID кейса
-       - Название
-       - Ссылку на **внешний клиентский сайт**, если она присутствует. **Важно**: ссылки, ведущие на `interexy` (например, `https://interexy.com/cases/...`), а также ссылки на магазины приложений (App Store, Google Play, `playmarket`, `apps.apple.com`, `play.google.com`) НЕ включай. Используй только ссылки на оригинальный сайт клиента (например, `https://classful.com`, `https://scale.com`). Если такой ссылки нет, оставь поле `link` пустым.
-       - Одно предложение, почему этот кейс подходит (стек, индустрия, тип проблемы).
-
-       {forbidden_note}
-       Никогда не используй один кейс дважды. Если подходящих нет – выбери наиболее близкие.
-
-    4. **Hook Generation**: Generate exactly 3 distinct hook options for Block 1 of the cover letter.
-       Rules for each hook:
-       - Addresses a different specific technical risk, business pain, or observable challenge from the job description.
-       - Never starts with "Most...". Use conversational openers only: "Let me be honest...", "From what I see...", "To be honest...", "Let me be direct...", or similar natural openers.
-       - 1-2 sentences maximum.
-       - Must be specific to THIS job — not a generic opener that could apply to any posting.
-
-       Score each hook 0-10 on specificity (how directly it targets a concrete, observable pain from THIS job description).
-       Auto-select the highest-scoring hook as `selected_hook`. It will be used as Block 1 in the cover letter.
-
-    5. **Cover Letter Generation**: Напиши письмо-отклик от лица выбранного кандидата, строго следуя правилам оформления (cover_letter_rules). Use `selected_hook` (from step 4) as Block 1 (Hook) of the letter. Используй буквально правила: структуру (Hook, Bridge, Case 1, Case 2, Closing, CTA, Signature), форматирование (без маркеров, без жирного, без заголовков, только plain paragraphs), максимальную длину 150-200 слов. Вплети 3-5 ключевых навыков из вакансии в описание кейсов или в closing. Не перечисляй их списком.
-
-       **Важно про переводы строк**: при генерации письма используй **реальные символы перевода строки** (line breaks) для разделения абзацев. Не экранируй их как `\\n`. В поле `cover_letter` JSON должен содержать текст с настоящими переносами строк (это допустимо в JSON строках). Абзацы отделяй пустой строкой (два перевода строки).
-
-    6. **Screening Answers**: Если в описании вакансии есть блок скрининг-вопросов (обычно начинается с "You will be asked to answer..." или "Please answer the following"), то сгенерируй ответы на каждый вопрос в виде нумерованного списка. Ответы должны быть полными, с деталями проектов, ссылками на кейсы, технологиями и метриками. Если вопрос про опыт – обязательно указывай конкретный кейс (из выбранных выше). Если вопрос про сертификаты – ответь стандартно: "У меня нет формальных сертификатов, но есть подтверждённый производственный опыт". Для технических вопросов дай точный ответ. Если скрининг-вопросов нет, оставь поле пустым.
-
-       **Важно про переводы строк**: при генерации ответов используй **реальные символы перевода строки** (line breaks). Каждый новый вопрос с ответом начинай с новой строки. В поле `screening_answers` JSON должен содержать текст с настоящими переносами строк, а не экранированными `\\n`.
-
-    ### Выходной формат (строго JSON):
-    {{
-      "job_evaluation": {{
-        "decision": "PASS" или "SKIP",
-        "reasoning": "краткое обоснование",
-        "flags": "например, 'urgent_start, test_task_required' или пустая строка"
-      }},
-      "selected_profile": {{
-        "name": "Tilek" или "Victoria" или "Vicode Solutions" или null,
-        "reasoning": "почему выбран"
-      }},
-      "selected_cases": [
-        {{
-          "case_id": "id",
-          "name": "название",
-          "link": "ссылка (может быть пустой строкой)",
-          "reasoning": "почему выбран"
-        }}
-      ],
-      "hook_options": [
-        {{"text": "hook variant 1", "specificity_score": 8}},
-        {{"text": "hook variant 2", "specificity_score": 6}},
-        {{"text": "hook variant 3", "specificity_score": 7}}
-      ],
-      "selected_hook": "text of the highest-scoring hook",
-      "cover_letter": "текст письма (с переносами строк)",
-      "screening_answers": "текст ответов (с переносами строк) или пустая строка"
-    }}
-
-    Важно: в JSON строках используй обычные переводы строк, а не `\\n`. Пример: "Привет\nМир" — это правильно. НЕ пиши "Привет\\nМир".
-    В ответе верни ТОЛЬКО JSON, без дополнительного текста.
-    """
     try:
         response = await client_local.chat.completions.create(
-            model="gpt-4o-mini",
+            model=MAIN_MODEL,
             messages=[
                 {"role": "system",
-                 "content": "Ты – экспертный помощник по подбору персонала для IT-компаний. Отвечай только JSON."},
+                 "content": (
+                     "You are a senior Upwork proposal writer. You always output strictly "
+                     "valid JSON. The `cover_letter`, `screening_answers`, and `selected_hook` "
+                     "fields must be in English only, never mixed with Russian."
+                 )},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
+            temperature=0.5,
             response_format={"type": "json_object"}
         )
         result_text = response.choices[0].message.content
         result = json.loads(result_text)
-        if 'cover_letter' in result:
-            result['cover_letter'] = fix_newlines(result['cover_letter'])
-        if 'screening_answers' in result:
-            result['screening_answers'] = fix_newlines(result['screening_answers'])
-        if 'selected_hook' in result:
-            result['selected_hook'] = fix_newlines(result['selected_hook'])
+        for k in ("cover_letter", "screening_answers", "selected_hook"):
+            if k in result and isinstance(result[k], str):
+                result[k] = fix_newlines(result[k])
         return result
     except json.JSONDecodeError as e:
         print(f"JSON decode error: {e}")
@@ -389,76 +647,81 @@ async def evaluate_job_and_generate(
         }
 
 
-def append_to_google_sheet(job_description: str, profile_name: str, cover_letter: str, screening_answers: str = ""):
+# -----------------------------------------------------------------------------
+# Refine - для команд из Slack типа "translate to english", "shorter",
+# "more technical". Не запускает RAG повторно.
+# -----------------------------------------------------------------------------
+async def refine_letter(
+    previous_letter: str,
+    previous_screening: str,
+    user_instruction: str,
+    api_key: str,
+    target_language: str = "English"
+) -> Dict[str, str]:
     """
-    Записывает данные в Google Sheets таблицу.
+    Применяет пользовательскую правку к уже сгенерированному письму, сохраняя
+    структуру (hook, bridge, кейсы со ссылками, closing, CTA, signature).
     """
-    try:
-        creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
-        spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
-        worksheet_name = os.getenv("GOOGLE_SHEETS_WORKSHEET_NAME", "Sheet1")
-
-        if not creds_json or not spreadsheet_id:
-            print("⚠️ Google Sheets credentials not configured, skipping logging")
-            return
-
-        creds_dict = json.loads(creds_json)
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client_gspread = gspread.authorize(creds)
-
-        sheet = client_gspread.open_by_key(spreadsheet_id).worksheet(worksheet_name)
-        now = datetime.now().isoformat()
-
-        # Ограничиваем длину полей
-        job_preview = job_description[:5000] + "..." if len(job_description) > 5000 else job_description
-        letter_preview = cover_letter[:5000] + "..." if len(cover_letter) > 5000 else cover_letter
-        screening_preview = screening_answers[:5000] + "..." if len(screening_answers) > 5000 else screening_answers
-
-        row = [now, job_preview, profile_name, letter_preview, screening_preview]
-        sheet.append_row(row)
-        print(f"✅ Записано в Google Sheets: {profile_name} - PASS")
-    except Exception as e:
-        import traceback
-        print(f"❌ Ошибка записи в Google Sheets: {e}")
-        traceback.print_exc()
-
-
-async def detect_dual_profile(job_description: str, api_key: str) -> bool:
-    """Returns True if the job genuinely requires both AI/ML and fullstack expertise."""
     client_local = AsyncOpenAI(api_key=api_key)
-    prompt = (
-        "Analyze this job description and determine if it requires BOTH:\n"
-        "- AI/ML skills (LLM, Python ML/data, RAG, MLOps, AI agents, NLP, data engineering)\n"
-        "- AND fullstack development skills (React, Node.js, SaaS frontend/backend, web app development)\n\n"
-        "A job qualifies as dual-profile ONLY if it genuinely requires deep expertise in BOTH areas "
-        "simultaneously — not just passing familiarity with one while being primarily the other.\n\n"
-        "Respond with JSON only: {\"dual_profile\": true} or {\"dual_profile\": false}\n\n"
-        "Job description:\n" + job_description
-    )
+    prompt = f"""You are refining an already-generated Upwork cover letter and its screening answers.
+Apply the user's instruction. Keep the proposal structure (hook, bridge, two cases with their links,
+closing, CTA, signature) intact unless the instruction explicitly asks to change a specific part.
+Do NOT add information that was not present in the previous letter (no invented metrics, no new cases).
+
+Output language: {target_language}. Never mix languages.
+Keep the length 150-200 words for the letter unless the instruction says otherwise.
+Use plain paragraphs, hyphen-minus as separator, no bullets, no headers, no bold.
+
+PREVIOUS LETTER:
+\"\"\"
+{previous_letter}
+\"\"\"
+
+PREVIOUS SCREENING ANSWERS (may be empty):
+\"\"\"
+{previous_screening}
+\"\"\"
+
+USER INSTRUCTION:
+\"\"\"
+{user_instruction}
+\"\"\"
+
+Respond with JSON only:
+{{
+  "cover_letter": "refined letter with real newlines",
+  "screening_answers": "refined answers with real newlines, or empty string if there were none",
+  "note": "one-sentence note about what you changed"
+}}
+"""
     try:
         response = await client_local.chat.completions.create(
-            model="gpt-4o-mini",
+            model=MAIN_MODEL,
             messages=[
-                {"role": "system", "content": "You analyze job requirements. Respond only with JSON."},
+                {"role": "system",
+                 "content": "You refine cover letters. Output strict JSON. Never mix languages."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0,
+            temperature=0.4,
             response_format={"type": "json_object"}
         )
         result = json.loads(response.choices[0].message.content)
-        return bool(result.get("dual_profile", False))
+        for k in ("cover_letter", "screening_answers"):
+            if k in result and isinstance(result[k], str):
+                result[k] = fix_newlines(result[k])
+        return result
     except Exception as e:
-        print(f"dual_profile detection error: {e}")
-        return False
+        print(f"refine_letter error: {e}")
+        return {"cover_letter": previous_letter, "screening_answers": previous_screening,
+                "note": f"refine failed: {e}"}
 
 
-# ----------------------------------------------------------------------
-# Пайплайн обработки (без GUI)
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Основной пайплайн
+# -----------------------------------------------------------------------------
 async def process_job(job_description: str) -> dict:
-    """Основная функция обработки вакансии – возвращает готовый результат."""
     try:
+        # 1. RAG: вытаскиваем кейсы
         best_cases = await rag.retrieve_cases(job_description, OPENAI_API_KEY)
         if not best_cases:
             return {"error": "No relevant cases found."}
@@ -478,17 +741,27 @@ async def process_job(job_description: str) -> dict:
         if not best_cases_with_content:
             return {"error": "No cases could be loaded."}
 
-        is_dual = await detect_dual_profile(job_description, OPENAI_API_KEY)
+        # 2. Параллельно: dual-profile detection + screening extraction
+        is_dual_task = detect_dual_profile(job_description, OPENAI_API_KEY)
+        screening_task = extract_screening_questions(job_description, OPENAI_API_KEY)
+        is_dual, screening_questions = await asyncio.gather(is_dual_task, screening_task)
 
+        if screening_questions:
+            print(f"📋 Detected {len(screening_questions)} screening questions:")
+            for q in screening_questions:
+                print(f"   - {q}")
+        else:
+            print("📋 No screening questions detected")
+
+        # 3. Генерация (dual или single)
         if is_dual:
             tilek_result = await evaluate_job_and_generate(
                 rag_query=job_description,
                 best_cases_with_content=best_cases_with_content,
                 user_profiles=user_profiles,
                 selection_rules=selection_rules,
-                cover_letter_rules=cover_letter_rules,
-                letter_template=letter_template,
                 api_key=OPENAI_API_KEY,
+                screening_questions=screening_questions,
                 allowed_profiles=["Tilek Chubakov"]
             )
             tilek_case_ids = [c.get("case_id", "") for c in tilek_result.get("selected_cases", [])]
@@ -497,12 +770,15 @@ async def process_job(job_description: str) -> dict:
                 best_cases_with_content=best_cases_with_content,
                 user_profiles=user_profiles,
                 selection_rules=selection_rules,
-                cover_letter_rules=cover_letter_rules,
-                letter_template=letter_template,
                 api_key=OPENAI_API_KEY,
+                screening_questions=screening_questions,
                 allowed_profiles=["Victoria", "Vicode Solutions"],
                 forbidden_case_ids=tilek_case_ids
             )
+            # Передадим screening_questions наружу - полезно для логов и Slack
+            tilek_result["_screening_questions"] = screening_questions
+            victoria_result["_screening_questions"] = screening_questions
+
             import threading
             for sub_result in [tilek_result, victoria_result]:
                 if sub_result.get("job_evaluation", {}).get("decision") == "PASS":
@@ -516,17 +792,20 @@ async def process_job(job_description: str) -> dict:
                         ),
                         daemon=True
                     ).start()
-            return {"dual": True, "tilek": tilek_result, "victoria": victoria_result}
+            return {"dual": True, "tilek": tilek_result, "victoria": victoria_result,
+                    "_screening_questions": screening_questions,
+                    "_job_description": job_description}
 
         evaluation = await evaluate_job_and_generate(
             rag_query=job_description,
             best_cases_with_content=best_cases_with_content,
             user_profiles=user_profiles,
             selection_rules=selection_rules,
-            cover_letter_rules=cover_letter_rules,
-            letter_template=letter_template,
-            api_key=OPENAI_API_KEY
+            api_key=OPENAI_API_KEY,
+            screening_questions=screening_questions
         )
+        evaluation["_screening_questions"] = screening_questions
+        evaluation["_job_description"] = job_description
 
         job_eval = evaluation.get("job_evaluation", {})
         if job_eval.get("decision") == "PASS":
