@@ -183,6 +183,40 @@ meaningfully different framing.
 # -----------------------------------------------------------------------------
 # Few-shot примеры (взяты из реальной истории Tilek/Vika)
 # -----------------------------------------------------------------------------
+PROPOSAL_VARIANT_STRUCTURES = """\
+PROPOSAL VARIANT STRUCTURES
+Generate three additional full cover-letter variants after the main `cover_letter`.
+They are meant to be ready-to-copy alternatives, not outlines.
+
+Shared rules for every variant:
+  - English only.
+  - 150-220 words.
+  - Plain paragraphs only, unless the job explicitly asks for numbered answers inside the proposal.
+  - Use only selected cases and facts available in the job, profiles, and RAG cases.
+  - Keep the profile signature and rate/availability rules consistent with the main letter.
+  - Do not copy the main letter. Each variant must have a clearly different opening and framing.
+  - Screening answers stay in `screening_answers`. However, if the job explicitly asks for
+    architecture, implementation plan, technical approach, stack recommendation, or "how would
+    you build this", exactly one variant may include one concise "For the architecture/stack..."
+    paragraph inside the letter.
+
+Variant 1 - Risk / Ownership:
+  Open with the concrete technical or business risk visible in this job. Then position the
+  profile as the person who owns that risk end to end. Use the cases as proof that the same
+  class of risk has been handled before.
+
+Variant 2 - Architecture / Approach:
+  Open with the system design problem in the job. Include one job-specific approach paragraph
+  such as "For the architecture..." or "For the stack..." with concrete components, boundaries,
+  or data flow. Keep it practical and not over-engineered.
+
+Variant 3 - Case-Led Proof:
+  Lead with the closest selected case and map it tightly to the client's requirements. The
+  opening should feel like "I have built this adjacent thing before", then explain the match
+  through stack, workflow, constraints, and measurable result.
+"""
+
+
 TILEK_EXAMPLES = """\
 EXAMPLE 1 (Tilek, Shopify + React + Python + AWS job):
 You are not considering the significant technical risk which can cost you $150k when React + Python systems are scaled on AWS without proper Terraform, API boundaries, and cloud cost control.
@@ -271,6 +305,52 @@ def fix_newlines(text: str) -> str:
     text = text.replace('\\n', '\n')
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text
+
+
+def normalize_proposal_variants(result: dict) -> None:
+    variants = result.get("proposal_variants")
+    if not isinstance(variants, list):
+        result["proposal_variants"] = []
+        return
+
+    expected_names = ("Risk / Ownership", "Architecture / Approach", "Case-Led Proof")
+    normalized = []
+    for variant in variants:
+        if len(normalized) == 3:
+            break
+        if not isinstance(variant, dict):
+            continue
+        cover_letter = variant.get("cover_letter")
+        if not isinstance(cover_letter, str) or not cover_letter.strip():
+            continue
+        normalized.append({
+            "structure_name": expected_names[len(normalized)],
+            "angle": str(variant.get("angle") or ""),
+            "when_to_use": str(variant.get("when_to_use") or ""),
+            "cover_letter": fix_newlines(cover_letter),
+        })
+    result["proposal_variants"] = normalized
+
+
+def format_cover_letter_for_sheet(cover_letter: str, proposal_variants: Optional[List[dict]] = None) -> str:
+    sections = []
+    if cover_letter:
+        sections.append("MAIN COVER LETTER\n" + cover_letter)
+
+    for idx, variant in enumerate(proposal_variants or [], 1):
+        if not isinstance(variant, dict):
+            continue
+        variant_letter = variant.get("cover_letter")
+        if not variant_letter:
+            continue
+        title = variant.get("structure_name") or f"Variant {idx}"
+        angle = variant.get("angle") or ""
+        heading = f"VARIANT {idx}: {title}"
+        if angle:
+            heading += f"\nAngle: {angle}"
+        sections.append(f"{heading}\n{variant_letter}")
+
+    return "\n\n---\n\n".join(sections)
 
 
 # -----------------------------------------------------------------------------
@@ -368,7 +448,13 @@ Respond with JSON only in this exact shape:
 # -----------------------------------------------------------------------------
 # Google Sheets логгер (без изменений)
 # -----------------------------------------------------------------------------
-def append_to_google_sheet(job_description: str, profile_name: str, cover_letter: str, screening_answers: str = ""):
+def append_to_google_sheet(
+    job_description: str,
+    profile_name: str,
+    cover_letter: str,
+    screening_answers: str = "",
+    proposal_variants: Optional[List[dict]] = None,
+):
     try:
         creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
         spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
@@ -387,7 +473,12 @@ def append_to_google_sheet(job_description: str, profile_name: str, cover_letter
         now = datetime.now().isoformat()
 
         job_preview = job_description[:5000] + "..." if len(job_description) > 5000 else job_description
-        letter_preview = cover_letter[:5000] + "..." if len(cover_letter) > 5000 else cover_letter
+        sheet_cover_letter = format_cover_letter_for_sheet(cover_letter, proposal_variants)
+        letter_preview = (
+            sheet_cover_letter[:45000] + "..."
+            if len(sheet_cover_letter) > 45000
+            else sheet_cover_letter
+        )
         screening_preview = screening_answers[:5000] + "..." if len(screening_answers) > 5000 else screening_answers
 
         row = [now, job_preview, profile_name, letter_preview, screening_preview]
@@ -471,6 +562,9 @@ JOB-SELECTION BASE RULES
 COVER LETTER RULES
 {cover_letter_rules}
 
+PROPOSAL VARIANT RULES
+{PROPOSAL_VARIANT_STRUCTURES}
+
 REFERENCE EXAMPLES (style only - do NOT copy text or cases, do NOT mimic specific phrasing
 unless it fits the actual job):
 {examples_block}
@@ -502,7 +596,7 @@ TASK STEPS
    Never use the same case twice.
    {forbidden_note}
 
-4. HOOK GENERATION. Produce exactly 3 hook options for Block 1.
+4. HOOK GENERATION. Produce exactly 3 distinct hook options for Block 1.
    HARD REQUIREMENT: each hook MUST reference a concrete detail observable in THIS job
    description - a specific technology mentioned, a concrete risk implied by the stated
    architecture, a specific business goal, a stated constraint, or a unique combination of
@@ -518,8 +612,8 @@ TASK STEPS
      - 6-8: references the exact stack combo and a plausible technical pitfall for it.
      - 3-5: generic for the role family, no anchor to this job.
      - 0-2: applies to almost any job.
-   Set `selected_hook` to the highest-scoring hook (must be >=6; if all are <6, regenerate
-   in your reasoning and try again before finalizing).
+   Auto-select by setting `selected_hook` to the highest-scoring hook (must be >=6; if all
+   are <6, regenerate in your reasoning and try again before finalizing).
 
 5. COVER LETTER. Write the letter strictly following the cover letter rules. Use
    `selected_hook` verbatim as Block 1. Use the cases selected in step 3, with the
@@ -528,10 +622,17 @@ TASK STEPS
 
 6. SCREENING ANSWERS. Generate per the SCREENING DETECTION block above.
 
+7. PROPOSAL VARIANTS. Generate exactly 3 additional full proposal variants in
+   `proposal_variants`, following PROPOSAL VARIANT RULES. Use these exact structure names:
+   "Risk / Ownership", "Architecture / Approach", and "Case-Led Proof". They must be
+   complete ready-to-copy letters, not outlines, and must be materially different from
+   the main `cover_letter`.
+
 NEWLINES
-For `cover_letter`, `screening_answers`, and `selected_hook` use REAL newline characters
-inside the JSON string (this is valid JSON). Do not escape them as `\\n`. Separate paragraphs
-with one blank line (two newlines).
+For `cover_letter`, `screening_answers`, `selected_hook`, and every
+`proposal_variants[].cover_letter` use REAL newline characters inside the JSON string
+(this is valid JSON). Do not escape them as `\\n`. Separate paragraphs with one blank
+line (two newlines).
 
 OUTPUT FORMAT - STRICT JSON, NOTHING ELSE
 {{
@@ -559,7 +660,27 @@ OUTPUT FORMAT - STRICT JSON, NOTHING ELSE
   ],
   "selected_hook": "text of the highest-scoring hook",
   "cover_letter": "letter body with real newlines",
-  "screening_answers": "answers with real newlines, or empty string"
+  "screening_answers": "answers with real newlines, or empty string",
+  "proposal_variants": [
+    {{
+      "structure_name": "Risk / Ownership",
+      "angle": "one sentence explaining this variant's angle",
+      "when_to_use": "one sentence explaining when this variant is strongest",
+      "cover_letter": "full ready-to-copy letter with real newlines"
+    }},
+    {{
+      "structure_name": "Architecture / Approach",
+      "angle": "one sentence explaining this variant's angle",
+      "when_to_use": "one sentence explaining when this variant is strongest",
+      "cover_letter": "full ready-to-copy letter with real newlines"
+    }},
+    {{
+      "structure_name": "Case-Led Proof",
+      "angle": "one sentence explaining this variant's angle",
+      "when_to_use": "one sentence explaining when this variant is strongest",
+      "cover_letter": "full ready-to-copy letter with real newlines"
+    }}
+  ]
 }}
 """
 
@@ -614,7 +735,8 @@ async def evaluate_job_and_generate(
                  "content": (
                      "You are a senior Upwork proposal writer. You always output strictly "
                      "valid JSON. The `cover_letter`, `screening_answers`, and `selected_hook` "
-                     "fields must be in English only, never mixed with Russian."
+                     "fields must be in English only, never mixed with Russian. Always include "
+                     "exactly 3 full proposal variants in `proposal_variants`."
                  )},
                 {"role": "user", "content": prompt}
             ],
@@ -626,6 +748,7 @@ async def evaluate_job_and_generate(
         for k in ("cover_letter", "screening_answers", "selected_hook"):
             if k in result and isinstance(result[k], str):
                 result[k] = fix_newlines(result[k])
+        normalize_proposal_variants(result)
         return result
     except json.JSONDecodeError as e:
         print(f"JSON decode error: {e}")
@@ -634,7 +757,8 @@ async def evaluate_job_and_generate(
             "selected_profile": {"name": None, "reasoning": ""},
             "selected_cases": [],
             "cover_letter": "",
-            "screening_answers": ""
+            "screening_answers": "",
+            "proposal_variants": []
         }
     except Exception as e:
         print(f"LLM call error: {e}")
@@ -643,7 +767,8 @@ async def evaluate_job_and_generate(
             "selected_profile": {"name": None, "reasoning": ""},
             "selected_cases": [],
             "cover_letter": "",
-            "screening_answers": ""
+            "screening_answers": "",
+            "proposal_variants": []
         }
 
 
@@ -788,7 +913,8 @@ async def process_job(job_description: str) -> dict:
                             job_description,
                             sub_result.get("selected_profile", {}).get("name", "Unknown"),
                             sub_result.get("cover_letter", ""),
-                            sub_result.get("screening_answers", "")
+                            sub_result.get("screening_answers", ""),
+                            sub_result.get("proposal_variants", [])
                         ),
                         daemon=True
                     ).start()
@@ -815,7 +941,13 @@ async def process_job(job_description: str) -> dict:
             import threading
             threading.Thread(
                 target=append_to_google_sheet,
-                args=(job_description, selected_profile, cover_letter, screening_answers),
+                args=(
+                    job_description,
+                    selected_profile,
+                    cover_letter,
+                    screening_answers,
+                    evaluation.get("proposal_variants", []),
+                ),
                 daemon=True
             ).start()
 

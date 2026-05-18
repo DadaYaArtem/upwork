@@ -145,6 +145,43 @@ def format_result_message(result: dict, header: str = "", show_screening_qs: boo
     return msg
 
 
+def format_proposal_variant_messages(result: dict, header: str = "Proposal variants") -> list[str]:
+    variants = result.get("proposal_variants") or []
+    if not isinstance(variants, list):
+        return []
+
+    messages = []
+    for idx, variant in enumerate(variants[:3], 1):
+        if not isinstance(variant, dict):
+            continue
+        cover_letter = variant.get("cover_letter")
+        if not cover_letter:
+            continue
+
+        structure = variant.get("structure_name") or f"Variant {idx}"
+        angle = variant.get("angle") or ""
+        when_to_use = variant.get("when_to_use") or ""
+
+        blocks = [f"*{header} - {idx}. {structure}*"]
+        if angle:
+            blocks.append(f"*Angle:* {angle}")
+        if when_to_use:
+            blocks.append(f"*When to use:* {when_to_use}")
+        blocks.append(f"```{cover_letter}```")
+
+        msg = "\n\n".join(blocks)
+        if len(msg) > 4000:
+            msg = msg[:3950] + "\n... (variant message truncated)"
+        messages.append(msg)
+
+    return messages
+
+
+def say_proposal_variants(result: dict, say, header: str = "Proposal variants") -> None:
+    for msg in format_proposal_variant_messages(result, header=header):
+        say(msg)
+
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -266,11 +303,14 @@ def handle_direct_message(message, say):
             say(f"📋 *Обнаруженные screening-вопросы ({len(screening_qs)}):*\n{qs_lines}")
         say(format_result_message(result.get("tilek", {}), header="🤖 Tilek Letter:",
                                   show_screening_qs=False))
+        say_proposal_variants(result.get("tilek", {}), say, header="Tilek proposal variants")
         say(format_result_message(result.get("victoria", {}), header="💻 Victoria Letter:",
                                   show_screening_qs=False))
+        say_proposal_variants(result.get("victoria", {}), say, header="Victoria proposal variants")
         return
 
     say(format_result_message(result))
+    say_proposal_variants(result, say)
 
 
 if __name__ == "__main__":
